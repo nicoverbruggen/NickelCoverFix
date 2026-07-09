@@ -9,8 +9,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
-#include <QPair>
 
 // Set in ncf_init() to ConfirmationDialogFactory::showOKDialog(QString const&, QString const&) [static].
 extern void (*ncf_showOKDialog)(const QString &title, const QString &text);
@@ -23,10 +23,11 @@ public slots:
     void onRepairTapped();
     void onTick();
 private:
-    QVector<QPair<QString, QString>> m_work;   // (on-disk .parsed source, our mirror dest)
+    QVector<QStringList> m_work;   // per book: [ librarySrc, libraryDst, lockSrc, lockDst ]
     int      m_idx     = 0;
     int      m_copied  = 0;
-    void    *m_dlg     = nullptr;              // N3ProgressDialog*
+    void    *m_dlg     = nullptr;              // QDialog* (our custom progress dialog)
+    void    *m_bar     = nullptr;              // QProgressBar*
     QObject *m_timer   = nullptr;              // QTimer*
     bool     m_running = false;
 };

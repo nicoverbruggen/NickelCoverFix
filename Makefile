@@ -4,8 +4,8 @@ override LIBRARY  := src/libnickelcoverfix.so
 override SOURCES  += src/config.c src/nickelcoverfix.cc
 override MOCS     += src/ncfbridge.h
 
-# QImage/QSize/QPixmap (QtGui) + QString/QByteArray/QCryptographicHash/QTimer/QObject (QtCore).
-override PKGCONF  += Qt5Core Qt5Gui
+# QDialog/QProgressBar/QLabel (QtWidgets) + QImage/QSize/QPixmap (QtGui) + QString/QTimer (QtCore).
+override PKGCONF  += Qt5Core Qt5Gui Qt5Widgets
 
 override CFLAGS   += -Wall -Wextra -Werror -fvisibility=hidden
 override CXXFLAGS += -std=gnu++11 -Wall -Wextra -Werror -Wno-missing-field-initializers -fvisibility=hidden -fvisibility-inlines-hidden

@@ -37,3 +37,10 @@ ncf_menu:1
 
 # Log to nickelcoverfix.log.
 ncf_log:1
+
+# ─── DEBUG / VERIFICATION (leave at 0 for normal use) ─────────────────────────────────────────────────
+# Draw a big bullseye in the center of any cover we serve — so you can see which covers come from this mod.
+ncf_debug_dot:0
+# Force our mirror onto EVERY book that has one (overrides the real cover), so coverage is visible at a
+# glance: dotted = mirrored, undotted = not yet. For testing only; leave off for normal use.
+ncf_force_serve:0

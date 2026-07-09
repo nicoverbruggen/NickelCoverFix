@@ -33,6 +33,7 @@
 #include <QString>
 #include <QByteArray>
 #include <QImage>
+#include <QPainter>
 #include <QSize>
 #include <QFile>
 #include <QFileInfo>
@@ -47,6 +48,12 @@
 #include <QTimer>
 #include <QPixmap>
 #include <QCryptographicHash>
+#include <QApplication>
+#include <QWidget>
+#include <QDialog>
+#include <QLabel>
+#include <QProgressBar>
+#include <QBoxLayout>
 
 #include <NickelHook.h>
 
@@ -58,7 +65,10 @@ static const char *const NCF_LIBNICKEL  = "/usr/local/Kobo/libnickel.so.1.0.0";
 static const char *const NCF_COVERS_DIR = NCF_CONFIG_DIR "/covers";     // our ContentID-keyed mirror
 static const char *const NCF_ARM_FLAG   = NCF_CONFIG_DIR "/enabled";    // presence = armed (boot-safety gate)
 static const qint64      NCF_MAX_BYTES  = 8 * 1024 * 1024;             // per-cover sanity cap
-static const char *const NCF_TYPES[]    = { "N3_LIBRARY_FULL", "N3_LIBRARY_GRID", "N3_LIBRARY_LIST" };
+// two cover sizes: library grid/list (small) and the lock/sleep screen (full device res)
+static const char *const NCF_TYPES_LIB[]  = { "N3_LIBRARY_FULL", "N3_LIBRARY_GRID", "N3_LIBRARY_LIST" };
+static const char *const NCF_TYPES_LOCK[] = { "N3_FULL", "N3_LIBRARY_FULL" };
+static const int         NCF_LOCK_MIN     = 700;                       // requested max(w,h) above this = lock screen
 
 // opaque Kobo types — we only ever pass their addresses through to libnickel
 struct KVolume;
@@ -68,18 +78,14 @@ typedef std::function<void(const KVolume &)> NcfVolumeFn;
 static QImage (*real_getCoverImage)(const void *vol, const QString &imageId, bool b) = nullptr;
 static QImage (*real_generateDefaultCover)(const void *vol, const QSize &size)        = nullptr;
 static void   (*real_moreview_ctor)(void *self, void *parent)                         = nullptr;
+static void   (*real_loadCover)(void *self)                                           = nullptr;  // VolumePixmapView::loadCover
+static void   (*real_setContent)(void *self, const void *vol, const QString &s)        = nullptr;  // VolumePixmapView::setContent
 // callables (dlsym)
+static void   (*vpv_loadDefaultCover)(void *self)                                     = nullptr;  // VolumePixmapView::loadDefaultCover
 static QString      (*content_getId)(const void *self)                                = nullptr;  // Content::getId() const (stable)
 static const void  *(*device_current)()                                               = nullptr;  // Device::getCurrentDevice()
 static QString      (*image_getFileName)(const void *dev, const void *vol, const QString &type) = nullptr; // Image::getFileName (static)
 static void         (*vm_forEach)(const QString &filter, const NcfVolumeFn &fn)        = nullptr;  // VolumeManager::forEach
-static void         (*n3pd_ctor)(void *self)                                           = nullptr;  // N3ProgressDialog()
-static void         (*n3pd_setTitle)(void *self, const QString &s)                     = nullptr;
-static void         (*n3pd_setProgress)(void *self, int v)                             = nullptr;
-static void         (*n3pd_setRange)(void *self, int lo, int hi)                       = nullptr;
-static void         (*n3pd_setBarVisible)(void *self, bool v)                          = nullptr;
-static void         (*qwidget_show)(void *w)                                           = nullptr;
-static void         (*qwidget_hide)(void *w)                                           = nullptr;
 static void         (*iconbtn_ctor)(void *self, void *parent)                          = nullptr;
 static void         (*iconbtn_setText)(void *self, const QString &s)                   = nullptr;
 static void         (*iconbtn_setPixmap)(void *self, const QPixmap &p)                 = nullptr;
@@ -95,26 +101,26 @@ static bool ncf_capture() { return ncf_global_config_bool("ncf_capture", true); 
 static bool ncf_serve()   { return ncf_global_config_bool("ncf_serve",   true);  }
 static bool ncf_menu()    { return ncf_global_config_bool("ncf_menu",    true);  }
 static bool ncf_active()  { return ncf_armed() && ncf_enabled(); }
+// debug/verification (default off): mark served covers with a dot; force our mirror onto every book that has one
+static bool ncf_debug_dot()   { return ncf_global_config_bool("ncf_debug_dot",   false); }
+static bool ncf_force_serve() { return ncf_global_config_bool("ncf_force_serve", false); }
 
 static int ncf_logbudget = 300;
 #define NCF_TLOG(...) do { if (ncf_logbudget > 0) { ncf_logbudget--; NCF_LOG(__VA_ARGS__); } } while (0)
-
-// getCoverImage sets this false, calls the real fn; a placeholder render (hooked generateDefaultCover)
-// flips it true. Thread-local so nested/concurrent renders don't race.
-static thread_local bool ncf_placeholder_path = false;
 
 // once-per-session capture guard (mod-owned mutex only — never a nickel lock)
 static QMutex        ncf_seen_mutex;
 static QSet<QString> ncf_seen;
 
 // ---- helpers -----------------------------------------------------------------------------
-static QString ncf_mirror_path(const QString &cid) {
+static QString ncf_mirror_base(const QString &cid) {
     const QByteArray h = QCryptographicHash::hash(cid.toUtf8(), QCryptographicHash::Sha1).toHex();
-    return QString::fromUtf8(NCF_COVERS_DIR) + QLatin1Char('/') + QString::fromUtf8(h) + QStringLiteral(".png");
+    return QString::fromUtf8(NCF_COVERS_DIR) + QLatin1Char('/') + QString::fromUtf8(h);
 }
+static QString ncf_mirror_path(const QString &cid)      { return ncf_mirror_base(cid) + QStringLiteral(".png"); }       // library
+static QString ncf_mirror_path_lock(const QString &cid) { return ncf_mirror_base(cid) + QStringLiteral("-lock.jpg"); } // lock screen
 
-static QImage ncf_load_mirror(const QString &cid) {
-    const QString path = ncf_mirror_path(cid);
+static QImage ncf_load_mirror_file(const QString &path) {
     QFileInfo fi(path);
     if (!fi.exists() || fi.size() <= 0 || fi.size() > NCF_MAX_BYTES)
         return QImage();
@@ -123,8 +129,35 @@ static QImage ncf_load_mirror(const QString &cid) {
         return QImage();
     return img;
 }
+static QImage ncf_load_mirror(const QString &cid) { return ncf_load_mirror_file(ncf_mirror_path(cid)); }
 
-// Load a source cover file and (re)write our mirror as PNG, atomically. Returns true on write.
+// Pick the right mirror for the requested size: the big lock-screen cover for large requests, the library
+// cover otherwise — falling back to whichever exists.
+static QImage ncf_serve_mirror(const QString &cid, const QSize &size) {
+    const bool wantLock = qMax(size.width(), size.height()) > NCF_LOCK_MIN;
+    QImage m = wantLock ? ncf_load_mirror_file(ncf_mirror_path_lock(cid)) : ncf_load_mirror(cid);
+    if (!m.isNull()) return m;
+    return wantLock ? ncf_load_mirror(cid) : ncf_load_mirror_file(ncf_mirror_path_lock(cid));
+}
+
+// Debug marker: a big black/white/black bullseye in the center — visible on light AND dark covers.
+static void ncf_draw_dot(QImage &img) {
+    if (img.isNull()) return;
+    if (img.format() != QImage::Format_ARGB32 && img.format() != QImage::Format_RGB32)
+        img = img.convertToFormat(QImage::Format_ARGB32);
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const int r = qMin(img.width(), img.height()) / 4;
+    const QPoint c(img.width() / 2, img.height() / 2);
+    p.setPen(Qt::NoPen);
+    p.setBrush(Qt::black);  p.drawEllipse(c, r, r);
+    p.setBrush(Qt::white);  p.drawEllipse(c, r * 3 / 5, r * 3 / 5);
+    p.setBrush(Qt::black);  p.drawEllipse(c, r / 4, r / 4);
+    p.end();
+}
+
+// Load a source cover file and (re)write our mirror, atomically. Format from the dst extension
+// (.jpg -> JPEG q88 for the big lock cover; else PNG). Returns true on write.
 static bool ncf_write_mirror_from(const QString &src, const QString &dst) {
     QFileInfo si(src);
     if (!si.exists() || si.size() <= 0 || si.size() > NCF_MAX_BYTES)
@@ -132,27 +165,48 @@ static bool ncf_write_mirror_from(const QString &src, const QString &dst) {
     QImage img;
     if (!img.load(src) || img.isNull())
         return false;
+    if (ncf_debug_dot()) ncf_draw_dot(img);                    // bake the marker into the stored cover
+    const bool jpg = dst.endsWith(QLatin1String(".jpg"));
     const QString tmp = dst + QStringLiteral(".tmp");
-    if (!img.save(tmp, "PNG"))
+    if (!img.save(tmp, jpg ? "JPG" : "PNG", jpg ? 88 : -1))
         return false;
     QFile::remove(dst);
     if (!QFile::rename(tmp, dst)) { QFile::remove(tmp); return false; }
     return true;
 }
 
-// Find a book's on-disk cover (largest type first) via Kobo's own path builder.
-static QString ncf_disk_cover_path(const void *dev, const void *vol) {
+// Find a book's best on-disk cover from a preference-ordered type list (biggest first).
+static QString ncf_disk_cover_path(const void *dev, const void *vol, const char *const *types, int ntypes) {
     if (!dev || !vol || !image_getFileName)
         return QString();
-    for (const char *t : NCF_TYPES) {
-        const QString p = image_getFileName(dev, vol, QString::fromUtf8(t));
+    for (int i = 0; i < ntypes; ++i) {
+        const QString p = image_getFileName(dev, vol, QString::fromUtf8(types[i]));
         if (!p.isEmpty() && QFile::exists(p))
             return p;
     }
     return QString();
 }
 
-// ---- CAPTURE: mirror the cover Kobo already had (live QImage, else on-disk .parsed) ------
+// Auto-mirror a book's on-disk cover as it's rendered — once per book+size per session, skip if we have it.
+// lock=false -> library size (grid path); lock=true -> full lock-screen size (sleep/read path).
+static void ncf_autocapture(const void *vol, bool lock) {
+    if (!vol || !content_getId || !device_current || !image_getFileName)
+        return;
+    const QString cid = content_getId(vol);
+    if (cid.isEmpty())
+        return;
+    const QString key = cid + (lock ? QLatin1String("#L") : QLatin1String("#G"));
+    { QMutexLocker lk(&ncf_seen_mutex); if (ncf_seen.contains(key)) return; ncf_seen.insert(key); }
+    const QString dst = lock ? ncf_mirror_path_lock(cid) : ncf_mirror_path(cid);
+    if (QFile::exists(dst))
+        return;
+    const QString src = lock ? ncf_disk_cover_path(device_current(), vol, NCF_TYPES_LOCK, 2)
+                             : ncf_disk_cover_path(device_current(), vol, NCF_TYPES_LIB, 3);
+    if (!src.isEmpty() && ncf_write_mirror_from(src, dst))
+        NCF_TLOG("autocapture cid=%s -> %s", qPrintable(cid), lock ? "lock" : "lib");
+}
+
+// ---- CAPTURE: mirror the cover Kobo has on disk as books render ---------------------------
 extern "C" __attribute__((visibility("default")))
 QImage _ncf_getCoverImage(const void *vol, const QString &imageId, bool b) {
     if (!real_getCoverImage)
@@ -160,26 +214,20 @@ QImage _ncf_getCoverImage(const void *vol, const QString &imageId, bool b) {
     if (!ncf_active())
         return real_getCoverImage(vol, imageId, b);
 
-    ncf_placeholder_path = false;
     QImage img = real_getCoverImage(vol, imageId, b);
 
-    if (ncf_capture() && content_getId && vol) {
+    if (ncf_capture()) ncf_autocapture(vol, /*lock*/ true);   // sleep/read context -> full lock-screen mirror
+    // debug/verification: force our mirror onto every book that has one, so coverage is visible everywhere
+    // (books with a dot = mirrored; books without = not yet). Overrides the real cover — debug only.
+    if (ncf_force_serve() && content_getId && vol) {
         const QString cid = content_getId(vol);
         if (!cid.isEmpty()) {
-            bool fresh = false;
-            { QMutexLocker lock(&ncf_seen_mutex); fresh = !ncf_seen.contains(cid); if (fresh) ncf_seen.insert(cid); }
-            if (fresh) {
-                const QString dst = ncf_mirror_path(cid);
-                if (!QFile::exists(dst)) {
-                    bool ok = false;
-                    if (!ncf_placeholder_path && !img.isNull()) {
-                        ok = img.save(dst, "PNG");                      // live real cover
-                    } else if (device_current) {
-                        const QString src = ncf_disk_cover_path(device_current(), vol);  // else grab from disk
-                        if (!src.isEmpty()) ok = ncf_write_mirror_from(src, dst);
-                    }
-                    if (ok) NCF_TLOG("capture cid=%s -> mirrored", qPrintable(cid));
-                }
+            QImage m = ncf_serve_mirror(cid, img.size());
+            if (!m.isNull()) {
+                QImage out = (!img.isNull() && img.size().isValid() && !img.size().isEmpty() && m.size() != img.size())
+                    ? m.scaled(img.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                    : m;
+                return out;
             }
         }
     }
@@ -189,12 +237,10 @@ QImage _ncf_getCoverImage(const void *vol, const QString &imageId, bool b) {
 // ---- SERVE: return our mirror instead of the placeholder ---------------------------------
 extern "C" __attribute__((visibility("default")))
 QImage _ncf_generateDefaultCover(const void *vol, const QSize &size) {
-    ncf_placeholder_path = true;                               // tell the capture hook this render was a placeholder
-
     if (ncf_active() && ncf_serve() && content_getId && vol) {
         const QString cid = content_getId(vol);
         if (!cid.isEmpty()) {
-            QImage m = ncf_load_mirror(cid);
+            QImage m = ncf_serve_mirror(cid, size);
             if (!m.isNull()) {
                 QImage out = (size.isValid() && !size.isEmpty() && m.size() != size)
                     ? m.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation)
@@ -205,6 +251,28 @@ QImage _ncf_generateDefaultCover(const void *vol, const QSize &size) {
         }
     }
     return real_generateDefaultCover ? real_generateDefaultCover(vol, size) : QImage();
+}
+
+// ---- DEBUG: force the grid to show our mirror for every book (coverage check) ------------
+// The library grid gets real covers async via onImageReady (virtual, unhookable) and only falls to
+// loadDefaultCover -> generateDefaultCover (our serve) when no cover is available. So to force our (dotted)
+// mirror onto every grid cover for a coverage check, route loadCover through the default path.
+extern "C" __attribute__((visibility("default")))
+void _ncf_loadCover(void *self) {
+    if (ncf_active() && ncf_force_serve() && vpv_loadDefaultCover && self) {
+        vpv_loadDefaultCover(self);
+        return;
+    }
+    if (real_loadCover) real_loadCover(self);
+}
+
+// ---- CAPTURE (grid): mirror each book's cover as it's assigned to a cover widget ----------
+// setContent(Volume const&, QString const&) hands us the book by-symbol — no struct offset needed.
+extern "C" __attribute__((visibility("default")))
+void _ncf_setContent(void *self, const void *vol, const QString &shortcoverId) {
+    if (real_setContent) real_setContent(self, vol, shortcoverId);
+    if (ncf_active() && ncf_capture())
+        ncf_autocapture(vol, /*lock*/ false);                  // library-size mirror as the grid populates
 }
 
 // ---- More > "Repair book covers" row -----------------------------------------------------
@@ -220,12 +288,12 @@ void _ncf_MoreView_ctor(void *self, void *parent) {
     void *row = ::operator new(0x58);
     if (!row) return;
     iconbtn_ctor(row, container);
-    if (iconbtn_setText)   iconbtn_setText(row, QStringLiteral("Repair book covers"));
-    if (iconbtn_setPixmap) { QPixmap icon(QStringLiteral(":/images/fte/missingbooks_repair.png")); iconbtn_setPixmap(row, icon); }
+    if (iconbtn_setText)   iconbtn_setText(row, QStringLiteral("Repair Book Covers"));
+    if (iconbtn_setPixmap) { QPixmap icon(QStringLiteral(":/images/reading/settings_gear.png")); iconbtn_setPixmap(row, icon); }
     qboxlayout_addWidget(inner, row, 0, 0);
-    if (qwidget_show) qwidget_show(row);
+    static_cast<QWidget *>(row)->show();
     QObject::connect((QObject *)row, "2tapped()", g_bridge, "1onRepairTapped()");
-    NCF_LOG("MoreView: appended 'Repair book covers' row");
+    NCF_LOG("MoreView: appended 'Repair Book Covers' row");
 }
 
 // ---- NcfBridge slots (defined here so they can reach the resolved symbols) ----------------
@@ -238,29 +306,58 @@ void NcfBridge::onRepairTapped() {
     }
     QDir().mkpath(QString::fromUtf8(NCF_COVERS_DIR));
 
-    // 1) enumerate the library (main thread, warm cache) -> work-list of (on-disk cover, our mirror)
+    // 1) enumerate the library (main thread, warm cache) -> work-list of
+    //    [ librarySrc, libraryDst, lockSrc, lockDst ] per book
     m_work.clear(); m_idx = 0; m_copied = 0;
     const void *dev = device_current();
     NcfVolumeFn fn = [dev, this](const KVolume &v) {
         const void *vol = reinterpret_cast<const void *>(&v);
         const QString cid = content_getId(vol);
         if (cid.isEmpty()) return;
-        const QString src = ncf_disk_cover_path(dev, vol);
-        if (src.isEmpty()) return;                              // nothing on disk (Repair-my-account can fill it)
-        m_work.append(qMakePair(src, ncf_mirror_path(cid)));
+        const QString libSrc  = ncf_disk_cover_path(dev, vol, NCF_TYPES_LIB, 3);
+        const QString lockSrc = ncf_disk_cover_path(dev, vol, NCF_TYPES_LOCK, 2);
+        if (libSrc.isEmpty() && lockSrc.isEmpty()) return;     // nothing on disk (Repair-my-account can fill it)
+        m_work.append(QStringList{ libSrc, ncf_mirror_path(cid), lockSrc, ncf_mirror_path_lock(cid) });
     };
     vm_forEach(QString(), fn);
 
-    // 2) progress dialog
-    m_dlg = nullptr;
-    if (n3pd_ctor) {
-        m_dlg = ::operator new(0x78);                          // sizeof(N3ProgressDialog)
-        n3pd_ctor(m_dlg);
-        if (n3pd_setTitle)      n3pd_setTitle(m_dlg, QStringLiteral("Repairing book covers…"));
-        if (n3pd_setBarVisible) n3pd_setBarVisible(m_dlg, true);
-        if (n3pd_setRange)      n3pd_setRange(m_dlg, 0, m_work.isEmpty() ? 1 : m_work.size());
-        if (n3pd_setProgress)   n3pd_setProgress(m_dlg, 0);
-        if (qwidget_show)       qwidget_show(m_dlg);
+    // 2) our own compact progress dialog (QtWidgets) — small + centered, no full-screen white takeover
+    m_dlg = nullptr; m_bar = nullptr;
+    {
+        QWidget *parent = QApplication::activeWindow();
+        QDialog *dlg = new QDialog(parent);
+        dlg->setObjectName(QStringLiteral("ncfRepairDialog"));
+        QVBoxLayout *lay = new QVBoxLayout(dlg);
+        lay->setContentsMargins(52, 46, 52, 56);
+        lay->setSpacing(26);
+        QLabel *lbl = new QLabel(QStringLiteral("Repairing Book Covers…"), dlg);
+        lbl->setObjectName(QStringLiteral("ncfTitle"));
+        lbl->setAlignment(Qt::AlignCenter);
+        QProgressBar *bar = new QProgressBar(dlg);
+        bar->setRange(0, m_work.isEmpty() ? 1 : m_work.size());
+        bar->setValue(0);
+        bar->setTextVisible(true);
+        QLabel *desc = new QLabel(QStringLiteral(
+            "Caching your book covers so they still show when you're offline. This can take a while."), dlg);
+        desc->setObjectName(QStringLiteral("ncfDesc"));
+        desc->setAlignment(Qt::AlignCenter);
+        desc->setWordWrap(true);
+        lay->addWidget(lbl);
+        lay->addWidget(bar);
+        lay->addWidget(desc);
+        dlg->setStyleSheet(QStringLiteral(
+            "#ncfRepairDialog{background:#ffffff;border:3px solid #000000;}"
+            "#ncfTitle{color:#000000;font-size:34px;font-weight:bold;}"
+            "#ncfDesc{color:#000000;font-size:22px;}"
+            "QProgressBar{border:2px solid #000000;background:#ffffff;color:#000000;"
+            "font-size:26px;min-height:46px;text-align:center;}"
+            "QProgressBar::chunk{background:#000000;}"));
+        dlg->resize(820, 340);
+        if (parent) dlg->move(parent->geometry().center() - dlg->rect().center());
+        dlg->show();
+        dlg->raise();
+        m_dlg = dlg;
+        m_bar = bar;
     }
 
     // 3) drive the copy in chunks on the event loop
@@ -276,27 +373,26 @@ void NcfBridge::onRepairTapped() {
 void NcfBridge::onTick() {
     const int BATCH = 4;
     for (int n = 0; n < BATCH && m_idx < m_work.size(); ++n, ++m_idx) {
-        const QString &src = m_work[m_idx].first;
-        const QString &dst = m_work[m_idx].second;
-        QFileInfo di(dst), si(src);
-        if (!di.exists() || si.lastModified() > di.lastModified()) {   // repair: create or refresh
-            if (ncf_write_mirror_from(src, dst)) m_copied++;
-        }
+        const QStringList &e = m_work[m_idx];              // [ librarySrc, libraryDst, lockSrc, lockDst ]
+        bool any = false;
+        if (!e[0].isEmpty() && ncf_write_mirror_from(e[0], e[1])) any = true;   // library mirror
+        if (!e[2].isEmpty() && ncf_write_mirror_from(e[2], e[3])) any = true;   // lock-screen mirror
+        if (any) m_copied++;                               // Repair always regenerates both
     }
-    if (n3pd_setProgress && m_dlg) n3pd_setProgress(m_dlg, m_idx);
+    if (m_bar) static_cast<QProgressBar *>(m_bar)->setValue(m_idx);
 
     if (m_idx >= m_work.size()) {
         if (m_timer) { static_cast<QTimer *>(m_timer)->stop(); m_timer->deleteLater(); m_timer = nullptr; }
         if (m_dlg) {
-            if (qwidget_hide) qwidget_hide(m_dlg);
-            static_cast<QObject *>(m_dlg)->deleteLater();
-            m_dlg = nullptr;
+            static_cast<QDialog *>(m_dlg)->hide();
+            static_cast<QDialog *>(m_dlg)->deleteLater();     // deletes child label/bar/layout too
+            m_dlg = nullptr; m_bar = nullptr;
         }
         const int total = m_work.size();
         m_running = false;
         NCF_LOG("repair: done, mirrored %d of %d", m_copied, total);
         if (ncf_showOKDialog)
-            ncf_showOKDialog(QStringLiteral("Repair book covers"),
+            ncf_showOKDialog(QStringLiteral("Repair Book Covers"),
                 QString(QStringLiteral("Cached %1 of %2 cover(s). They'll now show offline. If books are still "
                         "missing a cover, go online and run Settings > Device information > \"Repair your Kobo "
                         "account\", then tap Repair book covers again.")).arg(m_copied).arg(total));
@@ -313,9 +409,9 @@ static int ncf_init() {
             ncf_armed(), ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu());
     NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p",
             (void*)real_getCoverImage, (void*)real_generateDefaultCover, (void*)real_moreview_ctor, (void*)g_bridge);
-    NCF_LOG("startup(v1): getId=%p device=%p getFileName=%p forEach=%p n3pd=%p showOK=%p",
+    NCF_LOG("startup(v1): getId=%p device=%p getFileName=%p forEach=%p showOK=%p",
             (void*)content_getId, (void*)device_current, (void*)image_getFileName, (void*)vm_forEach,
-            (void*)n3pd_ctor, (void*)ncf_showOKDialog);
+            (void*)ncf_showOKDialog);
     if (!ncf_armed())
         NCF_LOG("NOT ARMED: passing through. Create %s/enabled and reboot to activate.", NCF_CONFIG_DIR_DISP);
     return 0;
@@ -355,6 +451,12 @@ static struct nh_hook NickelCoverFixHooks[] = {
     { .sym = "_ZN8MoreViewC1EP7QWidget", .sym_new = "_ncf_MoreView_ctor",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_moreview_ctor),
       .desc = "append Repair book covers row", .optional = true },
+    { .sym = "_ZN16VolumePixmapView9loadCoverEv", .sym_new = "_ncf_loadCover",
+      .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_loadCover),
+      .desc = "debug force_serve: route grid covers through the default path", .optional = true },
+    { .sym = "_ZN16VolumePixmapView10setContentERK6VolumeRK7QString", .sym_new = "_ncf_setContent",
+      .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_setContent),
+      .desc = "auto-mirror library cover as the grid populates (Volume by-symbol)", .optional = true },
     {0},
 };
 
@@ -363,13 +465,7 @@ static struct nh_dlsym NickelCoverFixDlsym[] = {
     { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(device_current), .desc = "Device::getCurrentDevice", .optional = true },
     { .name = "_ZN5Image11getFileNameERK6DeviceRK6VolumeRK7QString", .out = nh_symoutptr(image_getFileName), .desc = "Image::getFileName", .optional = true },
     { .name = "_ZN13VolumeManager7forEachERK7QStringRKSt8functionIFvRK6VolumeEE", .out = nh_symoutptr(vm_forEach), .desc = "VolumeManager::forEach", .optional = true },
-    { .name = "_ZN16N3ProgressDialogC1Ev", .out = nh_symoutptr(n3pd_ctor), .desc = "N3ProgressDialog ctor", .optional = true },
-    { .name = "_ZN16N3ProgressDialog8setTitleERK7QString", .out = nh_symoutptr(n3pd_setTitle), .desc = "N3ProgressDialog::setTitle", .optional = true },
-    { .name = "_ZN16N3ProgressDialog11setProgressEi", .out = nh_symoutptr(n3pd_setProgress), .desc = "N3ProgressDialog::setProgress", .optional = true },
-    { .name = "_ZN16N3ProgressDialog19setProgressBarRangeEii", .out = nh_symoutptr(n3pd_setRange), .desc = "N3ProgressDialog::setProgressBarRange", .optional = true },
-    { .name = "_ZN16N3ProgressDialog21setProgressBarVisibleEb", .out = nh_symoutptr(n3pd_setBarVisible), .desc = "N3ProgressDialog::setProgressBarVisible", .optional = true },
-    { .name = "_ZN7QWidget4showEv", .out = nh_symoutptr(qwidget_show), .desc = "QWidget::show", .optional = true },
-    { .name = "_ZN7QWidget4hideEv", .out = nh_symoutptr(qwidget_hide), .desc = "QWidget::hide", .optional = true },
+    { .name = "_ZN16VolumePixmapView16loadDefaultCoverEv", .out = nh_symoutptr(vpv_loadDefaultCover), .desc = "VolumePixmapView::loadDefaultCover", .optional = true },
     { .name = "_ZN14IconLeftButtonC1EP7QWidget", .out = nh_symoutptr(iconbtn_ctor), .desc = "IconLeftButton ctor", .optional = true },
     { .name = "_ZN14IconLeftButton7setTextERK7QString", .out = nh_symoutptr(iconbtn_setText), .desc = "IconLeftButton::setText", .optional = true },
     { .name = "_ZN14IconLeftButton9setPixmapERK7QPixmap", .out = nh_symoutptr(iconbtn_setPixmap), .desc = "IconLeftButton::setPixmap", .optional = true },
