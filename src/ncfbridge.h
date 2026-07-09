@@ -38,8 +38,9 @@ private:
     QVector<CaptureJob> m_capture_work;
     QSet<QString> m_capture_pending;
     QObject *m_capture_timer = nullptr;
-    QVector<QStringList> m_work;   // per book: [ librarySrc, libraryDst, lockSrc, lockDst ]
+    QVector<QStringList> m_work;   // per book: [ librarySrc, libraryDst, lockSrc, lockDst, title, cid, hash ]
     QSet<QString> m_repair_blacklist;
+    QStringList m_repair_list;
     int      m_idx     = 0;
     int      m_copied  = 0;
     void    *m_dlg     = nullptr;              // N3ProgressDialog* (Kobo-owned native dialog)

@@ -79,6 +79,7 @@
 static const char *const NCF_LIBNICKEL  = "/usr/local/Kobo/libnickel.so.1.0.0";
 static const char *const NCF_COVERS_DIR = NCF_CONFIG_DIR "/covers";     // only directory this mod writes to
 static const char *const NCF_BLACKLIST_FILE = NCF_CONFIG_DIR "/blacklist.txt";
+static const char *const NCF_LIST_FILE = NCF_CONFIG_DIR "/list.txt";
 // These limits protect both storage and the render path from malformed or unexpectedly large image files.
 // Keep the compressed-byte and decoded-pixel limits separate: a small compressed image can expand enormously.
 static const qint64      NCF_MAX_BYTES  = 8 * 1024 * 1024;             // per-cover compressed-file sanity cap
@@ -114,6 +115,9 @@ static bool   (*content_isPurchaseable)(const void *self)                       
 static const void *(*vpv_getVolume)(const void *self)                                 = nullptr;  // VolumePixmapView::getVolume() (this+0xac, by symbol)
 static void   (*bcv_setImage)(void *self, const QImage &img, const QString &label)     = nullptr;  // BookCoverView::setImage (vtable-only -> can't hook, dlsym + call directly)
 static QString      (*content_getId)(const void *self)                                = nullptr;  // Content::getId() const (stable)
+// Use Content::getTitle(), not getTitleRaw(): the latter returns Kobo's raw internal metadata representation,
+// while getTitle() performs the firmware's conversion to a normal QString for the Repair manifest.
+static QString      (*content_getTitle)(const void *self)                             = nullptr;  // Content::getTitle() const (optional list label)
 static const void  *(*device_current)()                                               = nullptr;  // Device::getCurrentDevice()
 static QString      (*image_getFileName)(const void *dev, const void *vol, const QString &type) = nullptr; // Image::getFileName (static)
 static void         (*vm_forEach)(const QString &filter, const NcfVolumeFn &fn)        = nullptr;  // VolumeManager::forEach
@@ -308,11 +312,14 @@ static bool ncf_commit_temp(const QString &tmp, const QString &dst, qint64 old_s
     return true;
 }
 
-static QString ncf_mirror_base(const QString &cid) {
+static QString ncf_mirror_key(const QString &cid) {
     // ContentID is user/database data, so hash it before using it in a path. This prevents path separators or
     // unusual IDs from escaping the single mod-owned cache directory.
     const QByteArray h = QCryptographicHash::hash(cid.toUtf8(), QCryptographicHash::Sha1).toHex();
-    return QString::fromUtf8(NCF_COVERS_DIR) + QLatin1Char('/') + QString::fromUtf8(h);
+    return QString::fromUtf8(h);
+}
+static QString ncf_mirror_base(const QString &cid) {
+    return QString::fromUtf8(NCF_COVERS_DIR) + QLatin1Char('/') + ncf_mirror_key(cid);
 }
 static QString ncf_mirror_path(const QString &cid)      { return ncf_mirror_base(cid) + QStringLiteral(".png"); }       // library
 static QString ncf_mirror_path_lock(const QString &cid) { return ncf_mirror_base(cid) + QStringLiteral("-lock.jpg"); } // lock screen
@@ -340,6 +347,40 @@ static QSet<QString> ncf_read_repair_blacklist() {
     }
     NCF_LOG("repair: loaded %d blacklist ID(s)", ids.size());
     return ids;
+}
+
+static bool ncf_write_repair_list(const QStringList &entries) {
+    // Write a complete replacement after Repair finishes. A temporary file prevents an interrupted run from
+    // leaving a partially written manifest that could mislead someone preparing custom covers.
+    const QString path = QString::fromUtf8(NCF_LIST_FILE);
+    const QString tmp = path + QStringLiteral(".tmp");
+    QFile::remove(tmp);
+    QFile file(tmp);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        NCF_LOG("repair: could not write list.txt");
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setCodec("UTF-8");
+    for (const QString &entry : entries)
+        stream << entry << QLatin1Char('\n');
+    stream.flush();
+    if (!file.flush()) {
+        file.close();
+        QFile::remove(tmp);
+        NCF_LOG("repair: could not flush list.txt");
+        return false;
+    }
+    file.close();
+
+    QFile::remove(path);
+    if (!QFile::rename(tmp, path)) {
+        QFile::remove(tmp);
+        NCF_LOG("repair: could not replace list.txt");
+        return false;
+    }
+    return true;
 }
 
 static QImage ncf_load_mirror_file(const QString &path) {
@@ -815,17 +856,22 @@ void NcfBridge::onRepairTapped() {
 
     // 1) enumerate the library (main thread, warm cache) -> work-list of
     //    [ librarySrc, libraryDst, lockSrc, lockDst ] per book
-    m_work.clear(); m_repair_blacklist = ncf_read_repair_blacklist(); m_idx = 0; m_copied = 0;
+    m_work.clear(); m_repair_list.clear(); m_repair_blacklist = ncf_read_repair_blacklist(); m_idx = 0; m_copied = 0;
     const void *dev = device_current();
     NcfVolumeFn fn = [dev, this](const KVolume &v) {
         const void *vol = reinterpret_cast<const void *>(&v);
         const QString cid = content_getId(vol);
         if (cid.isEmpty()) return;
-        if (m_repair_blacklist.contains(cid)) return;
+        // Accept both forms users may have available: the stable ContentID, or the hash used in the mirror
+        // filename. The latter is useful when a custom cover was copied by looking at the covers directory.
+        if (m_repair_blacklist.contains(cid) || m_repair_blacklist.contains(ncf_mirror_key(cid))) return;
+        const QString title = content_getTitle ? content_getTitle(vol).simplified() : QStringLiteral("(unknown title)");
+        const QString label = title.isEmpty() ? QStringLiteral("(unknown title)") : title;
+        const QString hash = ncf_mirror_key(cid);
         const QString libSrc  = ncf_disk_cover_path(dev, vol, NCF_TYPES_LIB, 3);
         const QString lockSrc = ncf_disk_cover_path(dev, vol, NCF_TYPES_LOCK, 2);
         if (libSrc.isEmpty() && lockSrc.isEmpty()) return;     // nothing on disk (Repair-my-account can fill it)
-        m_work.append(QStringList{ libSrc, ncf_mirror_path(cid), lockSrc, ncf_mirror_path_lock(cid) });
+        m_work.append(QStringList{ libSrc, ncf_mirror_path(cid), lockSrc, ncf_mirror_path_lock(cid), label, cid, hash });
     };
     vm_forEach(QString(), fn);
 
@@ -858,11 +904,14 @@ void NcfBridge::onTick() {
     // responsive. Do not move this work to a worker thread: these libnickel Volume APIs are main-thread APIs.
     const int BATCH = 4;
     for (int n = 0; n < BATCH && m_idx < m_work.size(); ++n, ++m_idx) {
-        const QStringList &e = m_work[m_idx];              // [ librarySrc, libraryDst, lockSrc, lockDst ]
+        const QStringList &e = m_work[m_idx];              // [ librarySrc, libraryDst, lockSrc, lockDst, title, cid, hash ]
         bool any = false;
         if (!e[0].isEmpty() && ncf_write_mirror_from(e[0], e[1])) any = true;   // library mirror
         if (!e[2].isEmpty() && ncf_write_mirror_from(e[2], e[3])) any = true;   // lock-screen mirror
-        if (any) m_copied++;                               // count books with at least one successful mirror
+        if (any) {
+            m_copied++;                                     // count books with at least one successful mirror
+            m_repair_list.append(QStringLiteral("%1 - %2 - %3").arg(e[4], e[5], e[6]));
+        }
     }
     if (m_dlg && ncf_progress_setProgress) ncf_progress_setProgress(m_dlg, m_idx);
 
@@ -874,13 +923,14 @@ void NcfBridge::onTick() {
             m_dlg = nullptr;
         }
         const int total = m_work.size();
+        ncf_write_repair_list(m_repair_list);
         m_running = false;
         NCF_LOG("repair: done, mirrored %d of %d", m_copied, total);
         if (ncf_showOKDialog)
             ncf_showOKDialog(QStringLiteral("Repair Book Covers"),
                 QString(QStringLiteral("Cached %1 of %2 cover(s). They'll now show offline. If books are still "
                         "missing a cover, go online and run Settings > Device information > \"Repair your Kobo "
-                        "account\", then tap Repair book covers again.")).arg(m_copied).arg(total));
+                        "account\", then try this again.")).arg(m_copied).arg(total));
     }
 }
 
@@ -963,6 +1013,7 @@ static struct nh_dlsym NickelCoverFixDlsym[] = {
     // These functions are not safely hookable through a PLT entry in the relevant call path, or are helpers
     // needed by the deferred workflow. Resolve them by exported mangled name and treat them as optional.
     { .name = "_ZNK7Content5getIdEv", .out = nh_symoutptr(content_getId), .desc = "Content::getId (stable ContentID)", .optional = true },
+    { .name = "_ZNK7Content8getTitleEv", .out = nh_symoutptr(content_getTitle), .desc = "Content::getTitle (Repair list label)", .optional = true },
     { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(device_current), .desc = "Device::getCurrentDevice", .optional = true },
     { .name = "_ZN5Image11getFileNameERK6DeviceRK6VolumeRK7QString", .out = nh_symoutptr(image_getFileName), .desc = "Image::getFileName", .optional = true },
     { .name = "_ZN13VolumeManager7forEachERK7QStringRKSt8functionIFvRK6VolumeEE", .out = nh_symoutptr(vm_forEach), .desc = "VolumeManager::forEach", .optional = true },
