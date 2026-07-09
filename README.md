@@ -25,10 +25,9 @@ legitimately. `.kobo-images` is never written; removing the mod (or its `.adds` 
 
 ## Boot safety
 Covers render on the boot/sleep-screen path, so the mod is built to never hang a boot:
-no enumeration (purely reactive), no blocking work (no network/zip/crypto/DB), fail-open on everything, a
-per-cover size cap, and an **arming flag** — it passes all hooks through until you create
-`.adds/nickelcoverfix/enabled` and reboot, so installing it can't affect boot. Capture defaults off for a
-serve-first rollout.
+no enumeration (purely reactive, one cover at a time), no blocking work (no network/zip/crypto/DB),
+fail-open on everything, a per-cover size cap, and work that's a cheap raw copy (or a guarded encode).
+Disable over USB with `ncf_enabled:0`; Repair runs only on a menu tap (post-boot, chunked).
 
 ## Build
 ```
@@ -36,8 +35,8 @@ serve-first rollout.
 ```
 
 ## Install
-Copy `KoboRoot.tgz` to `KOBOeReader/.kobo/` and reboot. Then arm it: create an empty file
-`KOBOeReader/.adds/nickelcoverfix/enabled` over USB and reboot. See `res/doc` for the full first-run flow.
+Copy `KoboRoot.tgz` to `KOBOeReader/.kobo/` and reboot. It's active on install — covers are mirrored as
+books are shown, or all at once via **More > Repair Book Covers**. See `res/doc` for details.
 
 ## Uninstall
 Delete `KOBOeReader/.adds/nickelcoverfix/uninstall` and reboot.

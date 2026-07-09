@@ -21,7 +21,7 @@ strip:
 .PHONY: strip
 
 ifeq ($(NCF_CONFIG_DIR),)
-override NCF_CONFIG_DIR := /mnt/onboard/.adds/nickelcoverfix
+override NCF_CONFIG_DIR := /mnt/onboard/.adds/nickel-cover-fix
 endif
 
 override CPPFLAGS += -DNCF_CONFIG_DIR='"$(NCF_CONFIG_DIR)"' -DNCF_CONFIG_DIR_DISP='"$(patsubst /mnt/onboard/%,KOBOeReader/%,$(NCF_CONFIG_DIR))"'

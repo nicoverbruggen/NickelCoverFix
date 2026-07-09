@@ -1,46 +1,41 @@
 #
-# NickelCoverFix configuration (v1)
+# NickelCoverFix configuration
 #
-# Fixes covers blanking to the title/author PLACEHOLDER when a cover is unreachable (offline, or after a
-# sync changes the store CoverImageId). It keeps a copy of the cover Kobo ITSELF already had, keyed by the
-# book's stable ContentID, and serves that back instead of the placeholder. No book file is read and
-# nothing is decrypted. Kobo's own cache (.kobo-images) is never written; remove the mod to fully revert.
+# Keeps your book covers showing even when Kobo can't fetch them (offline, or after a sync changes the
+# cover id). It mirrors the cover Kobo itself already had — keyed by the book's stable ContentID — and
+# shows that. No book files are read, nothing is decrypted, and Kobo's own cache (.kobo-images) is never
+# written. Remove the mod (or this folder) to fully revert.
 #
-# Changes take effect on reboot.
+# The mod is active on install. Changes below take effect on reboot. To disable it, set ncf_enabled:0
+# (over USB) and reboot; to remove it, delete the `uninstall` file in this folder and reboot.
 #
-# ─── ARMING (boot safety) ─────────────────────────────────────────────────────────────────────────────
-# The mod does NOTHING until you ARM it: create an empty file named `enabled` in this folder
-# (KOBOeReader/.adds/nickelcoverfix/enabled) over USB, then reboot. Until then every hook passes straight
-# through, so installing it cannot affect boot. To DISARM (e.g. anything misbehaves), delete that `enabled`
-# file over USB and reboot.
-#
-# ─── SUGGESTED FIRST RUN ──────────────────────────────────────────────────────────────────────────────
-#   1. Install, arm (create `enabled`), reboot — confirm a clean boot.
-#   2. Browse your library once (covers are mirrored as they show — online, or from disk if already cached),
-#      OR just tap  More > Repair book covers  to mirror the whole library at once (with a progress bar).
-#   3. Go offline (or let a sync change a cover) — the mirrored cover shows instead of a placeholder.
-#   If some books never had a cover on disk, run Settings > "Repair your Kobo account" (online) to fetch
-#   them, then  More > Repair book covers  again.
+# Covers are mirrored automatically as books are shown (owned books only — store/recommendation covers are
+# never touched), or all at once via  More > Repair Book Covers. If a book's cover was never available to
+# begin with, run Settings > "Repair your Kobo account" (online) to fetch covers, then Repair Book Covers.
 
-# Master kill-switch. 0 = everything inert (works like stock), even when armed.
+# Master kill-switch. 0 = everything inert (works like stock).
 ncf_enabled:1
 
-# CAPTURE: as a book is shown and we don't have its cover yet, mirror it (from the live cover, or from the
-# on-disk copy if offline). Once per book per session. 0 = only the manual "Repair book covers" populates.
+# CAPTURE: mirror each owned book's cover as it's shown (raw copy from Kobo's cache, or the rendered image
+# for covers not on disk). Once per book per session. 0 = only the manual "Repair Book Covers" populates.
 ncf_capture:1
 
-# SERVE: when a cover would fall back to the placeholder, show the mirrored cover instead (if we have one).
+# SERVE: show our mirrored cover instead of the placeholder when a cover is unavailable.
 ncf_serve:1
 
-# Add the "Repair book covers" row to the More page (mirrors every book's on-disk cover, with a progress bar).
+# Add the "Repair Book Covers" row to the More page (mirrors your whole library at once, with a progress bar).
 ncf_menu:1
 
 # Log to nickelcoverfix.log.
 ncf_log:1
 
-# ─── DEBUG / VERIFICATION (leave at 0 for normal use) ─────────────────────────────────────────────────
-# Draw a big bullseye in the center of any cover we serve — so you can see which covers come from this mod.
+# ─── COVER MODE ───────────────────────────────────────────────────────────────────────────────────────
+# 1 = scoped override: for every LIBRARY book we can make a cover for, show our own copy. Store items,
+#     recommendations, previews and new/cloud books have no cover for us to copy, so they fall through to
+#     Kobo's normal path untouched. Offline-consistent for your library, no regression elsewhere.
+# 0 = graceful fallback: show Kobo's real cover when it's available, and use our copy only to replace a
+#     placeholder (offline / changed cover id). The most conservative option.
+ncf_force_serve:1
+
+# DEBUG: stamp a bullseye on covers we serve, so you can see which come from this mod. Leave 0 normally.
 ncf_debug_dot:0
-# Force our mirror onto EVERY book that has one (overrides the real cover), so coverage is visible at a
-# glance: dotted = mirrored, undotted = not yet. For testing only; leave off for normal use.
-ncf_force_serve:0

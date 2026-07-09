@@ -20,9 +20,9 @@
 //
 // BOOT SAFETY (must never hang a boot): purely reactive (one cover at a time, only when nickel renders it —
 // at cold boot that's just the last-read book); no network/zip/crypto/DB/foreign-lock; fail-open (worst case
-// = the placeholder); per-file size cap; and an ARM FLAG — every hook passes straight through until
-// <config>/enabled exists, so installing it can't affect boot. Repair runs only on a menu tap (post-boot),
-// chunked on the event loop, so it never blocks e-ink and a fault there is failsafe-recoverable.
+// = the placeholder); per-file size cap; work is a cheap raw copy or a guarded encode. Disable over USB with
+// ncf_enabled:0. Repair runs only on a menu tap (post-boot), chunked on the event loop, so it never blocks
+// e-ink and a fault there is failsafe-recoverable.
 
 #include <cstdint>
 #include <functional>
@@ -42,6 +42,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
+#include <QHash>
 #include <QVector>
 #include <QPair>
 #include <QObject>
@@ -49,6 +50,7 @@
 #include <QPixmap>
 #include <QCryptographicHash>
 #include <QApplication>
+#include <QRegularExpression>
 #include <QWidget>
 #include <QDialog>
 #include <QLabel>
@@ -63,7 +65,6 @@
 
 static const char *const NCF_LIBNICKEL  = "/usr/local/Kobo/libnickel.so.1.0.0";
 static const char *const NCF_COVERS_DIR = NCF_CONFIG_DIR "/covers";     // our ContentID-keyed mirror
-static const char *const NCF_ARM_FLAG   = NCF_CONFIG_DIR "/enabled";    // presence = armed (boot-safety gate)
 static const qint64      NCF_MAX_BYTES  = 8 * 1024 * 1024;             // per-cover sanity cap
 // two cover sizes: library grid/list (small) and the lock/sleep screen (full device res)
 static const char *const NCF_TYPES_LIB[]  = { "N3_LIBRARY_FULL", "N3_LIBRARY_GRID", "N3_LIBRARY_LIST" };
@@ -80,8 +81,13 @@ static QImage (*real_generateDefaultCover)(const void *vol, const QSize &size)  
 static void   (*real_moreview_ctor)(void *self, void *parent)                         = nullptr;
 static void   (*real_loadCover)(void *self)                                           = nullptr;  // VolumePixmapView::loadCover
 static void   (*real_setContent)(void *self, const void *vol, const QString &s)        = nullptr;  // VolumePixmapView::setContent
+static void   (*real_imageReady)(void *self, const QImage &img, const void *vol, const QString &s) = nullptr; // VolumePixmapView::imageReady
+static void   (*real_sbhw_setContent)(void *self, const void *vol)                     = nullptr;  // SingleBookHomeWidget::setContent(Volume const&)
 // callables (dlsym)
 static void   (*vpv_loadDefaultCover)(void *self)                                     = nullptr;  // VolumePixmapView::loadDefaultCover
+static bool   (*content_isPurchaseable)(const void *self)                             = nullptr;  // Content::isPurchaseable() const
+static const void *(*vpv_getVolume)(const void *self)                                 = nullptr;  // VolumePixmapView::getVolume() (this+0xac, by symbol)
+static void   (*bcv_setImage)(void *self, const QImage &img, const QString &label)     = nullptr;  // BookCoverView::setImage (vtable-only -> can't hook, dlsym + call directly)
 static QString      (*content_getId)(const void *self)                                = nullptr;  // Content::getId() const (stable)
 static const void  *(*device_current)()                                               = nullptr;  // Device::getCurrentDevice()
 static QString      (*image_getFileName)(const void *dev, const void *vol, const QString &type) = nullptr; // Image::getFileName (static)
@@ -94,16 +100,17 @@ void               (*ncf_showOKDialog)(const QString &, const QString &)        
 
 static NcfBridge *g_bridge = nullptr;
 
-// ---- config / arming ---------------------------------------------------------------------
-static bool ncf_armed()   { return access(NCF_ARM_FLAG, F_OK) == 0; }                       // live: touch/delete over USB
+// ---- config ------------------------------------------------------------------------------
 static bool ncf_enabled() { return ncf_global_config_bool("ncf_enabled", true); }           // master kill-switch
 static bool ncf_capture() { return ncf_global_config_bool("ncf_capture", true);  }
 static bool ncf_serve()   { return ncf_global_config_bool("ncf_serve",   true);  }
 static bool ncf_menu()    { return ncf_global_config_bool("ncf_menu",    true);  }
-static bool ncf_active()  { return ncf_armed() && ncf_enabled(); }
-// debug/verification (default off): mark served covers with a dot; force our mirror onto every book that has one
+static bool ncf_active()  { return ncf_enabled(); }
+// ncf_force_serve (default ON): "always our copy or placeholder" — generate + show our cover for every book,
+//   bypassing Kobo's live path. Set 0 for the graceful fallback (Kobo's real cover when available, our copy
+//   only to rescue placeholders). ncf_debug_dot (default off): stamp served covers with a bullseye.
+static bool ncf_force_serve() { return ncf_global_config_bool("ncf_force_serve", true);  }
 static bool ncf_debug_dot()   { return ncf_global_config_bool("ncf_debug_dot",   false); }
-static bool ncf_force_serve() { return ncf_global_config_bool("ncf_force_serve", false); }
 
 static int ncf_logbudget = 300;
 #define NCF_TLOG(...) do { if (ncf_logbudget > 0) { ncf_logbudget--; NCF_LOG(__VA_ARGS__); } } while (0)
@@ -111,6 +118,11 @@ static int ncf_logbudget = 300;
 // once-per-session capture guard (mod-owned mutex only — never a nickel lock)
 static QMutex        ncf_seen_mutex;
 static QSet<QString> ncf_seen;
+
+// per-cover-widget override decision: does this widget's book have a cover we can produce? (set in
+// setContent, read in loadCover). Keyed by widget pointer; widgets are recycled so the map stays small.
+static QMutex             ncf_ov_mutex;
+static QHash<void *, bool> ncf_override;
 
 // ---- helpers -----------------------------------------------------------------------------
 static QString ncf_mirror_base(const QString &cid) {
@@ -247,6 +259,16 @@ QImage _ncf_generateDefaultCover(const void *vol, const QSize &size) {
     if (ncf_active() && ncf_serve() && content_getId && vol) {
         const QString cid = content_getId(vol);
         if (!cid.isEmpty()) {
+            // generate on demand (cheap raw copy) if we don't have it yet, then serve. Always ensure the
+            // library mirror (any disk type), plus the lock mirror for big requests — so a book with ANY
+            // on-disk cover always yields a mirror. (The home "Now Reading" reaches us only here, via
+            // loadDefaultCover@plt->generateDefaultCover@plt; its setContent/loadCover are vtable-dispatched
+            // and NickelHook's GOT patch can't catch those, so this is where we must produce the cover.)
+            if (ncf_capture()) {
+                ncf_autocapture(vol, /*lock*/ false);
+                if (qMax(size.width(), size.height()) > NCF_LOCK_MIN)
+                    ncf_autocapture(vol, /*lock*/ true);
+            }
             QImage m = ncf_serve_mirror(cid, size);
             if (!m.isNull()) {
                 QImage out = (size.isValid() && !size.isEmpty() && m.size() != size)
@@ -260,26 +282,98 @@ QImage _ncf_generateDefaultCover(const void *vol, const QSize &size) {
     return real_generateDefaultCover ? real_generateDefaultCover(vol, size) : QImage();
 }
 
-// ---- DEBUG: force the grid to show our mirror for every book (coverage check) ------------
-// The library grid gets real covers async via onImageReady (virtual, unhookable) and only falls to
-// loadDefaultCover -> generateDefaultCover (our serve) when no cover is available. So to force our (dotted)
-// mirror onto every grid cover for a coverage check, route loadCover through the default path.
+// ---- OVERRIDE (scoped): show our copy for library books we can produce; else let Kobo's path run -------
+// The grid gets real covers async via onImageReady (virtual, unhookable). With force_serve on we route
+// loadCover -> loadDefaultCover -> our serve, BUT only for books setContent flagged "we can produce a cover"
+// — so store items, recommendations, previews and new/cloud books fall through to Kobo untouched.
 extern "C" __attribute__((visibility("default")))
 void _ncf_loadCover(void *self) {
     if (ncf_active() && ncf_force_serve() && vpv_loadDefaultCover && self) {
-        vpv_loadDefaultCover(self);
-        return;
+        bool ov = false;
+        { QMutexLocker lk(&ncf_ov_mutex); ov = ncf_override.value(self, false); }
+        if (ov) { vpv_loadDefaultCover(self); return; }
     }
     if (real_loadCover) real_loadCover(self);
 }
 
-// ---- CAPTURE (grid): mirror each book's cover as it's assigned to a cover widget ----------
+// ---- CAPTURE + SCOPE (grid): mirror the book's cover, and decide whether we may override its widget -----
 // setContent(Volume const&, QString const&) hands us the book by-symbol — no struct offset needed.
 extern "C" __attribute__((visibility("default")))
 void _ncf_setContent(void *self, const void *vol, const QString &shortcoverId) {
     if (real_setContent) real_setContent(self, vol, shortcoverId);
-    if (ncf_active() && ncf_capture())
-        ncf_autocapture(vol, /*lock*/ false);                  // library-size mirror as the grid populates
+    bool canProduce = false;
+    if (ncf_active() && vol && content_getId) {
+        const QString cid = content_getId(vol);
+        if (!cid.isEmpty()) {
+            if (ncf_capture()) ncf_autocapture(vol, /*lock*/ false);   // generate the library mirror if we can
+            // "can we produce a cover?" — we already have a mirror, or Kobo has one on disk to copy.
+            // False for store/recommendation/preview/new items (nothing in .kobo-images) -> they fall through.
+            canProduce = QFile::exists(ncf_mirror_path(cid))
+                      || (device_current && image_getFileName
+                          && !ncf_disk_cover_path(device_current(), vol, NCF_TYPES_LIB, 3).isEmpty());
+        }
+    }
+    if (self) { QMutexLocker lk(&ncf_ov_mutex); ncf_override.insert(self, canProduce); }
+}
+
+// ---- CAPTURE (rendered): mirror the cover Kobo actually drew, so RAM-only covers (no .parsed on disk)
+// get saved too. Scoped to books you OWN (isPurchaseable == false) so store/recommendation covers are never
+// cached. This is the "fallback" for covers we can't raw-copy from disk.
+extern "C" __attribute__((visibility("default")))
+void _ncf_imageReady(void *self, const QImage &img, const void *vol, const QString &s) {
+    if (real_imageReady) real_imageReady(self, img, vol, s);
+    if (!(ncf_active() && ncf_capture()) || img.isNull() || !vol || !content_getId)
+        return;
+    if (content_isPurchaseable && content_isPurchaseable(vol))   // store/recommendation item -> leave alone
+        return;
+    const QString cid = content_getId(vol);
+    if (cid.isEmpty())
+        return;
+    const QString dst = ncf_mirror_path(cid);
+    bool fresh = false;
+    { QMutexLocker lk(&ncf_seen_mutex); const QString k = cid + QLatin1String("#R");
+      fresh = !ncf_seen.contains(k); if (fresh) ncf_seen.insert(k); }
+    if (!fresh || QFile::exists(dst))                            // already mirrored (raw copy or earlier)
+        return;
+    QImage out = img;                                           // rendered cover — encode it (no disk source to copy)
+    if (ncf_debug_dot()) ncf_draw_dot(out);
+    const QString tmp = dst + QStringLiteral(".tmp");
+    QFile::remove(tmp);
+    if (out.save(tmp, "JPG", 85)) {
+        QFile::remove(dst);
+        if (!QFile::rename(tmp, dst)) QFile::remove(tmp);
+        else NCF_TLOG("ram-capture cid=%s (%dx%d)", qPrintable(cid), img.width(), img.height());
+    }
+}
+
+// ---- HOME "Now Reading" (SingleBookHomeWidget): force our cover onto the embedded BookCoverView ---------
+// The home widget dispatches its cover leaf-calls (setContent/loadCover/setImage) through the vtable, which
+// NickelHook's GOT patch can't intercept — so none of the VolumePixmapView hooks above fire for it, and the
+// home stays a placeholder while the grid works (confirmed on-device). But SingleBookHomeWidget::setContent
+// IS reached via PLT (from FourBookHomeWidget::configure), so we catch it here. After Kobo configures the
+// widget we locate its BookCoverView child through the Qt object tree (no struct offset) and push our mirror
+// straight in via BookCoverView::setImage — which is itself unhookable (vtable-only, no GOT entry), so we
+// dlsym it and call it directly. Note: home books report isPurchaseable==true, so we do NOT gate on that.
+extern "C" __attribute__((visibility("default")))
+void _ncf_SingleBookHomeWidget_setContent(void *self, const void *vol) {
+    if (real_sbhw_setContent) real_sbhw_setContent(self, vol);
+    if (!(ncf_active() && ncf_serve()) || !self || !vol || !content_getId || !bcv_setImage)
+        return;
+    const QString cid = content_getId(vol);
+    if (cid.isEmpty())
+        return;
+    if (ncf_capture()) { ncf_autocapture(vol, /*lock*/ false); ncf_autocapture(vol, /*lock*/ true); }
+    const QImage m = ncf_serve_mirror(cid, QSize(4096, 4096));         // prefer the full lock mirror, fall back to library
+    if (m.isNull())
+        return;
+    // locate the embedded BookCoverView via the Qt object tree — offset-free, robust to layout changes
+    QObject *bcv = nullptr;
+    for (QObject *c : reinterpret_cast<QObject *>(self)->findChildren<QObject *>())
+        if (c && qstrcmp(c->metaObject()->className(), "BookCoverView") == 0) { bcv = c; break; }
+    if (!bcv)
+        return;
+    bcv_setImage(bcv, m, cid);
+    NCF_TLOG("home-serve cid=%s -> BookCoverView (%dx%d)", qPrintable(cid), m.width(), m.height());
 }
 
 // ---- More > "Repair book covers" row -----------------------------------------------------
@@ -296,7 +390,7 @@ void _ncf_MoreView_ctor(void *self, void *parent) {
     if (!row) return;
     iconbtn_ctor(row, container);
     if (iconbtn_setText)   iconbtn_setText(row, QStringLiteral("Repair Book Covers"));
-    if (iconbtn_setPixmap) { QPixmap icon(QStringLiteral(":/images/reading/settings_gear.png")); iconbtn_setPixmap(row, icon); }
+    if (iconbtn_setPixmap) { QPixmap icon(QStringLiteral(":/images/menu/info.png")); iconbtn_setPixmap(row, icon); }
     qboxlayout_addWidget(inner, row, 0, 0);
     static_cast<QWidget *>(row)->show();
     QObject::connect((QObject *)row, "2tapped()", g_bridge, "1onRepairTapped()");
@@ -352,14 +446,24 @@ void NcfBridge::onRepairTapped() {
         lay->addWidget(lbl);
         lay->addWidget(bar);
         lay->addWidget(desc);
-        dlg->setStyleSheet(QStringLiteral(
+        // match the Kobo UI font: Kobo sets it via the app stylesheet (* { font-family: ... }); read it back.
+        QString ff = qApp->font().family();
+        {
+            const QRegularExpressionMatch m =
+                QRegularExpression(QStringLiteral("font-family\\s*:\\s*([^;}\\r\\n]+)")).match(qApp->styleSheet());
+            if (m.hasMatch()) ff = m.captured(1).trimmed();
+        }
+        if (ff.isEmpty()) ff = QStringLiteral("sans-serif");
+        dlg->setStyleSheet(QString(QStringLiteral(
             "#ncfRepairDialog{background:#ffffff;border:3px solid #000000;}"
-            "#ncfTitle{color:#000000;font-size:34px;font-weight:bold;}"
-            "#ncfDesc{color:#000000;font-size:22px;}"
+            "#ncfRepairDialog, #ncfRepairDialog *{font-family:%1;}"
+            "#ncfTitle{color:#000000;font-size:40px;font-weight:bold;}"
+            "#ncfDesc{color:#000000;font-size:27px;}"
             "QProgressBar{border:2px solid #000000;background:#ffffff;color:#000000;"
-            "font-size:26px;min-height:46px;text-align:center;}"
-            "QProgressBar::chunk{background:#000000;}"));
-        dlg->resize(820, 340);
+            "font-size:30px;min-height:54px;text-align:center;}"
+            "QProgressBar::chunk{background:#000000;}")).arg(ff));
+        NCF_LOG("repair dialog font-family: %s", qPrintable(ff));
+        dlg->resize(860, 360);
         if (parent) dlg->move(parent->geometry().center() - dlg->rect().center());
         dlg->show();
         dlg->raise();
@@ -412,15 +516,14 @@ static int ncf_init() {
     mkdir(NCF_CONFIG_DIR, 0755);
     QDir().mkpath(QString::fromUtf8(NCF_COVERS_DIR));
     g_bridge = new NcfBridge(nullptr);
-    NCF_LOG("startup(v1): armed=%d enabled=%d capture=%d serve=%d menu=%d",
-            ncf_armed(), ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu());
-    NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p",
-            (void*)real_getCoverImage, (void*)real_generateDefaultCover, (void*)real_moreview_ctor, (void*)g_bridge);
+    NCF_LOG("startup(v1): enabled=%d capture=%d serve=%d menu=%d force=%d",
+            ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu(), ncf_force_serve());
+    NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p sbhw_setContent=%p bcv_setImage=%p",
+            (void*)real_getCoverImage, (void*)real_generateDefaultCover, (void*)real_moreview_ctor, (void*)g_bridge,
+            (void*)real_sbhw_setContent, (void*)bcv_setImage);
     NCF_LOG("startup(v1): getId=%p device=%p getFileName=%p forEach=%p showOK=%p",
             (void*)content_getId, (void*)device_current, (void*)image_getFileName, (void*)vm_forEach,
             (void*)ncf_showOKDialog);
-    if (!ncf_armed())
-        NCF_LOG("NOT ARMED: passing through. Create %s/enabled and reboot to activate.", NCF_CONFIG_DIR_DISP);
     return 0;
 }
 
@@ -429,7 +532,7 @@ static bool ncf_uninstall() {
     NCF_LOG("uninstall: removing NickelCoverFix files + our cover mirror (.kobo-images never touched)");
     bool ok = true;
     QDir(QString::fromUtf8(NCF_COVERS_DIR)).removeRecursively();
-    ok = ncf_del(NCF_ARM_FLAG) && ok;
+    ok = ncf_del(NCF_CONFIG_DIR "/enabled") && ok;   // remove any leftover arm flag from older builds
     ok = ncf_del(NCF_CONFIG_DIR "/config") && ok;
     ok = ncf_del(NCF_CONFIG_DIR "/default") && ok;
     ok = ncf_del(NCF_CONFIG_DIR "/doc") && ok;
@@ -464,6 +567,12 @@ static struct nh_hook NickelCoverFixHooks[] = {
     { .sym = "_ZN16VolumePixmapView10setContentERK6VolumeRK7QString", .sym_new = "_ncf_setContent",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_setContent),
       .desc = "auto-mirror library cover as the grid populates (Volume by-symbol)", .optional = true },
+    { .sym = "_ZN16VolumePixmapView10imageReadyERK6QImageRK6VolumeRK7QString", .sym_new = "_ncf_imageReady",
+      .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_imageReady),
+      .desc = "mirror the rendered cover (RAM-only covers), owned books only", .optional = true },
+    { .sym = "_ZN20SingleBookHomeWidget10setContentERK6Volume", .sym_new = "_ncf_SingleBookHomeWidget_setContent",
+      .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_sbhw_setContent),
+      .desc = "home Now-Reading: push our mirror onto the widget's BookCoverView (vtable blind spot)", .optional = true },
     {0},
 };
 
@@ -473,6 +582,9 @@ static struct nh_dlsym NickelCoverFixDlsym[] = {
     { .name = "_ZN5Image11getFileNameERK6DeviceRK6VolumeRK7QString", .out = nh_symoutptr(image_getFileName), .desc = "Image::getFileName", .optional = true },
     { .name = "_ZN13VolumeManager7forEachERK7QStringRKSt8functionIFvRK6VolumeEE", .out = nh_symoutptr(vm_forEach), .desc = "VolumeManager::forEach", .optional = true },
     { .name = "_ZN16VolumePixmapView16loadDefaultCoverEv", .out = nh_symoutptr(vpv_loadDefaultCover), .desc = "VolumePixmapView::loadDefaultCover", .optional = true },
+    { .name = "_ZNK7Content14isPurchaseableEv", .out = nh_symoutptr(content_isPurchaseable), .desc = "Content::isPurchaseable (owned-book gate)", .optional = true },
+    { .name = "_ZNK16VolumePixmapView9getVolumeEv", .out = nh_symoutptr(vpv_getVolume), .desc = "VolumePixmapView::getVolume (by-symbol Volume access)", .optional = true },
+    { .name = "_ZN13BookCoverView8setImageERK6QImageRK7QString", .out = nh_symoutptr(bcv_setImage), .desc = "BookCoverView::setImage (call directly; vtable-only, unhookable)", .optional = true },
     { .name = "_ZN14IconLeftButtonC1EP7QWidget", .out = nh_symoutptr(iconbtn_ctor), .desc = "IconLeftButton ctor", .optional = true },
     { .name = "_ZN14IconLeftButton7setTextERK7QString", .out = nh_symoutptr(iconbtn_setText), .desc = "IconLeftButton::setText", .optional = true },
     { .name = "_ZN14IconLeftButton9setPixmapERK7QPixmap", .out = nh_symoutptr(iconbtn_setPixmap), .desc = "IconLeftButton::setPixmap", .optional = true },
