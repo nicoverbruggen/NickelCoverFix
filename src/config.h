@@ -20,6 +20,7 @@ void ncf_config_free(ncf_config_t *cfg);
 const char *ncf_global_config_get(const char *key);
 bool ncf_global_config_bool(const char *key, bool default_value);
 double ncf_global_config_double(const char *key, double default_value);
+bool ncf_should_log_file(void);
 
 #ifdef __cplusplus
 }

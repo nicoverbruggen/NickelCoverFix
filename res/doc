@@ -8,13 +8,19 @@ already had**, keyed by the book's stable ContentID, and shows that instead.
 Kobo's own cache (`.kobo-images`) is never written. Remove the mod (or this folder) to fully revert.
 
 ## How it works
-- **Capture** — as each of *your* books is shown, its cover is mirrored to
+- **Capture** — as each of *your* books is shown, its cover is queued for mirroring to
   `.adds/nickel-cover-fix/covers/`: a fast raw copy from Kobo's on-disk cache when available, or the
   rendered image for covers that were only in memory. Store/recommendation covers are never touched.
 - **Serve** — when a cover would be a placeholder, the mirrored cover is shown instead (scaled to size:
   a smaller copy for the library, a full-res copy for the lock screen). This covers the library grid, the
   lock/sleep screen, and the home screen's **"Now Reading"** shelf.
-- **Repair Book Covers** (More menu) — mirror your whole library at once, with a progress bar.
+- **Repair Book Covers** (More menu) — mirror your whole library at once, with Kobo's native progress dialog.
+
+Repair is optional and fail-closed: if Kobo's native `N3ProgressDialog` or `IconLeftButton` API is unavailable,
+the menu row is omitted and no manual repair workflow runs. Capture and serving remain available.
+
+The mirror is bounded to 128 MiB total and keeps at least 32 MiB free on the device. Invalid or oversized
+images are skipped, and failed temporary files are cleaned up.
 
 Because the mirror is keyed by the stable ContentID, it survives offline gaps and cover-id changes.
 
@@ -38,7 +44,7 @@ Covers**.
 - `ncf_serve` — show a mirrored cover instead of the placeholder.
 - `ncf_force_serve` — cover mode (see above).
 - `ncf_menu` — add the Repair Book Covers row to the More page.
-- `ncf_log` — write `nickelcoverfix.log`.
+- `ncf_log` — write `nickelcoverfix.log` (`0` disables persistent file logging).
 - `ncf_debug_dot` — stamp served covers with a bullseye (debugging).
 
 ## Uninstall

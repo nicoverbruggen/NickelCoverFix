@@ -36,6 +36,9 @@ __attribute__((unused)) static inline void ncf_log_file_line(const char *file, i
 
     nh_log("%s (%s:%d)", msg, file, line);
 
+    if (!ncf_should_log_file())
+        return;
+
     mkdir(NCF_CONFIG_DIR, 0755);
     FILE *f = fopen(NCF_CONFIG_DIR "/nickelcoverfix.log", "a");
     if (!f)

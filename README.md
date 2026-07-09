@@ -38,9 +38,15 @@ called directly, since that function is vtable-only and can't be hooked).
 
 ## Boot safety
 Covers render on the boot/sleep-screen path, so the mod is built to never hang a boot: no enumeration
-(purely reactive, one cover at a time), no blocking work (no network/zip/crypto/DB), fail-open on everything,
-a per-cover size cap, and capture that's a cheap raw copy. Repair runs only on a menu tap (post-boot,
-chunked on the event loop).
+(purely reactive, one cover at a time), no network/zip/crypto/DB, fail-open on everything, bounded image
+decoding, and capture queued after the render hook returns. Repair runs only on a menu tap (post-boot,
+chunked on the event loop). The mirror has a 128 MiB total budget, preserves at least 32 MiB of free storage,
+and removes failed temporary files.
+
+The Repair row is located through Kobo's live Qt object tree rather than MoreView's private UI offsets. Repair
+uses Kobo's native `N3ProgressDialog` and `IconLeftButton`. It is an optional manual feature: if either the
+complete `N3ProgressDialog` API or the complete `IconLeftButton` API is unavailable, the row is not added and
+the Repair workflow is skipped entirely. Cover capture and serving continue independently.
 
 ## Cover mode (`ncf_force_serve`)
 - `1` (default) — **scoped override**: your library books show our own copy (offline-consistent); store,
@@ -53,7 +59,7 @@ chunked on the event loop).
 - `ncf_serve` — show a mirrored cover instead of the placeholder.
 - `ncf_force_serve` — cover mode (see above).
 - `ncf_menu` — add the Repair Book Covers row to the More page.
-- `ncf_log` — write `nickelcoverfix.log`.
+- `ncf_log` — write `nickelcoverfix.log` (`0` disables persistent file logging).
 - `ncf_debug_dot` — stamp served covers with a bullseye (debugging).
 
 ## Build

@@ -26,7 +26,7 @@ ncf_serve:1
 # Add the "Repair Book Covers" row to the More page (mirrors your whole library at once, with a progress bar).
 ncf_menu:1
 
-# Log to nickelcoverfix.log.
+# Log to nickelcoverfix.log. 0 disables persistent file logging.
 ncf_log:1
 
 # ─── COVER MODE ───────────────────────────────────────────────────────────────────────────────────────

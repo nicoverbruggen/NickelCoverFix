@@ -8,9 +8,11 @@
 #define NCF_BRIDGE_H
 
 #include <QObject>
+#include <QImage>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QSet>
 
 // Set in ncf_init() to ConfirmationDialogFactory::showOKDialog(QString const&, QString const&) [static].
 extern void (*ncf_showOKDialog)(const QString &title, const QString &text);
@@ -19,15 +21,27 @@ class NcfBridge : public QObject {
     Q_OBJECT
 public:
     explicit NcfBridge(QObject *parent = nullptr) : QObject(parent) {}
+    void queueCapture(const QString &src, const QString &dst, const QString &key);
+    void queueRenderedCapture(const QImage &img, const QString &dst, const QString &key);
 public slots:
     void onRepairTapped();
     void onTick();
+    void onCaptureTick();
 private:
+    struct CaptureJob {
+        QString src;
+        QString dst;
+        QString key;
+        QImage  image;
+        bool    fromImage = false;
+    };
+    QVector<CaptureJob> m_capture_work;
+    QSet<QString> m_capture_pending;
+    QObject *m_capture_timer = nullptr;
     QVector<QStringList> m_work;   // per book: [ librarySrc, libraryDst, lockSrc, lockDst ]
     int      m_idx     = 0;
     int      m_copied  = 0;
-    void    *m_dlg     = nullptr;              // QDialog* (our custom progress dialog)
-    void    *m_bar     = nullptr;              // QProgressBar*
+    void    *m_dlg     = nullptr;              // N3ProgressDialog* (Kobo-owned native dialog)
     QObject *m_timer   = nullptr;              // QTimer*
     bool     m_running = false;
 };

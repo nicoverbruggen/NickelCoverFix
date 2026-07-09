@@ -20,6 +20,12 @@ struct ncf_config_t {
     ncf_config_entry_t *tail;
 };
 
+static bool ncf_log_file_enabled = true;
+
+bool ncf_should_log_file(void) {
+    return ncf_log_file_enabled;
+}
+
 static void ncf_config_append(ncf_config_t *cfg, const char *key, const char *val) {
     ncf_config_entry_t *e = (ncf_config_entry_t*)calloc(1, sizeof(ncf_config_entry_t));
     if (!e || !(e->key = strdup(key)) || !(e->val = strdup(val))) {
@@ -180,8 +186,10 @@ void ncf_config_free(ncf_config_t *cfg) {
 
 static ncf_config_t *ncf_global_config(void) {
     static ncf_config_t *global = NULL;
-    if (!global)
+    if (!global) {
         global = ncf_config_parse();
+        ncf_log_file_enabled = ncf_config_bool(global, "ncf_log", true);
+    }
     return global;
 }
 
