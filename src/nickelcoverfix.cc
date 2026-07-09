@@ -53,6 +53,7 @@
 #include <QSize>
 #include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
 #include <QDateTime>
 #include <QDir>
 #include <QMutex>
@@ -77,6 +78,7 @@
 
 static const char *const NCF_LIBNICKEL  = "/usr/local/Kobo/libnickel.so.1.0.0";
 static const char *const NCF_COVERS_DIR = NCF_CONFIG_DIR "/covers";     // only directory this mod writes to
+static const char *const NCF_BLACKLIST_FILE = NCF_CONFIG_DIR "/blacklist.txt";
 // These limits protect both storage and the render path from malformed or unexpectedly large image files.
 // Keep the compressed-byte and decoded-pixel limits separate: a small compressed image can expand enormously.
 static const qint64      NCF_MAX_BYTES  = 8 * 1024 * 1024;             // per-cover compressed-file sanity cap
@@ -314,6 +316,31 @@ static QString ncf_mirror_base(const QString &cid) {
 }
 static QString ncf_mirror_path(const QString &cid)      { return ncf_mirror_base(cid) + QStringLiteral(".png"); }       // library
 static QString ncf_mirror_path_lock(const QString &cid) { return ncf_mirror_base(cid) + QStringLiteral("-lock.jpg"); } // lock screen
+
+static QSet<QString> ncf_read_repair_blacklist() {
+    // This list is intentionally read only when Repair starts. It is a user-controlled exception for custom
+    // covers, not a global serving rule, so ordinary capture and fallback behavior remain unchanged.
+    QSet<QString> ids;
+    QFile file(QString::fromUtf8(NCF_BLACKLIST_FILE));
+    if (!file.exists())
+        return ids;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        NCF_LOG("repair: could not read blacklist.txt");
+        return ids;
+    }
+
+    QTextStream stream(&file);
+    while (!stream.atEnd()) {
+        QString line = stream.readLine().trimmed();
+        const int comment = line.indexOf(QLatin1Char('#'));
+        if (comment >= 0)
+            line = line.left(comment).trimmed();
+        if (!line.isEmpty())
+            ids.insert(line);
+    }
+    NCF_LOG("repair: loaded %d blacklist ID(s)", ids.size());
+    return ids;
+}
 
 static QImage ncf_load_mirror_file(const QString &path) {
     return ncf_load_image_file(path);
@@ -788,12 +815,13 @@ void NcfBridge::onRepairTapped() {
 
     // 1) enumerate the library (main thread, warm cache) -> work-list of
     //    [ librarySrc, libraryDst, lockSrc, lockDst ] per book
-    m_work.clear(); m_idx = 0; m_copied = 0;
+    m_work.clear(); m_repair_blacklist = ncf_read_repair_blacklist(); m_idx = 0; m_copied = 0;
     const void *dev = device_current();
     NcfVolumeFn fn = [dev, this](const KVolume &v) {
         const void *vol = reinterpret_cast<const void *>(&v);
         const QString cid = content_getId(vol);
         if (cid.isEmpty()) return;
+        if (m_repair_blacklist.contains(cid)) return;
         const QString libSrc  = ncf_disk_cover_path(dev, vol, NCF_TYPES_LIB, 3);
         const QString lockSrc = ncf_disk_cover_path(dev, vol, NCF_TYPES_LOCK, 2);
         if (libSrc.isEmpty() && lockSrc.isEmpty()) return;     // nothing on disk (Repair-my-account can fill it)
