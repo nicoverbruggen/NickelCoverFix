@@ -33,13 +33,22 @@ The Repair row is located through Kobo's live Qt object tree without using MoreV
 
 You can replace a mirrored cover with your own image. Put it in `.adds/nickel-cover-fix/covers/` using the exact filename generated for that book: `sha1(ContentID).png` for the library cover or `sha1(ContentID)-lock.jpg` for the lock screen. The image must be readable by Qt and stay within the same size limits as any other mirror. It is used while `ncf_serve:1` is enabled. With `ncf_force_serve:0`, it is used only when Kobo would otherwise show a placeholder.
 
+### Recommended workflow
+
+1. Install the mod.
+2. Open **More > Repair Book Covers**.
+3. Connect the Kobo by USB and open `.adds/nickel-cover-fix/list.txt` to see which title, ContentID, and cover hash belong together.
+4. Use the ContentID or hash to find the corresponding files in `.adds/nickel-cover-fix/covers/`, then replace them with the covers you want to use.
+
 For good results, use a portrait image with the same aspect ratio as the cover it replaces. Around 600 pixels on the long edge is usually enough for a library cover. For the lock screen, use the device's native display resolution or the dimensions of the original lock-screen cover. Larger images are scaled down without cropping, while small images may look soft when enlarged.
 
 The safety limits are 8 MiB per file, 8192 pixels on either side, and 12 megapixels total. These are maximums, not recommended target sizes. Images outside those limits or images that Qt cannot read are ignored.
 
 Run **More > Repair Book Covers** before copying custom images. Repair rebuilds mirror files from Kobo's cache, so running it afterward can replace your custom covers.
 
-To keep custom covers out of a later Repair run, create `.adds/nickel-cover-fix/blacklist.txt` and add one stable ContentID per line. Blank lines and lines beginning with `#` are ignored. Repair skips matching books that are present in the library. The list does not affect automatic capture or serving, and old IDs that are no longer in the library are harmless.
+To keep custom covers out of a later Repair run, create `.adds/nickel-cover-fix/blacklist.txt` and add one stable ContentID or 40-character SHA-1 cover filename stem per line. For example, `0963c26c758a65db4ab0691a30abee91a795e106` matches the `.png` and `-lock.jpg` files with that name. Blank lines and lines beginning with `#` are ignored. Repair skips matching books that are present in the library. The list does not affect automatic capture or serving, and old IDs that are no longer in the library are harmless.
+
+After Repair finishes, it writes `.adds/nickel-cover-fix/list.txt` with one successfully mirrored book per line in this format: `Title - ContentID - cover-hash`. The hash is the filename stem used for the library `.png` cover and the lock-screen `-lock.jpg` cover. The file is UTF-8 text and can be searched with Ctrl-F or Cmd-F. If Kobo does not provide a title, the line uses `(unknown title)`.
 
 ## Cover mode (`ncf_force_serve`)
 

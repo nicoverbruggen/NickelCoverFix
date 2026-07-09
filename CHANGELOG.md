@@ -4,10 +4,9 @@
 
 ### Added
 
-- **Offline cover mirror:** preserves Kobo-obtained covers under stable ContentID-based filenames and serves
-  them when Nickel would otherwise show the title/author placeholder.
-- **Multiple cover paths:** supports library covers, lock/sleep-screen covers, and the home screen's
-  **Now Reading** shelf.
+- **Offline cover mirror:** preserves Kobo-obtained covers under stable ContentID-based filenames and serves them when Nickel would otherwise show the title/author placeholder.
+- **Blacklist support**: add `blacklist.txt` and make covers exempt from being replaced. You can replace existing images with your own to effectively get custom covers.
+- **Multiple cover paths:** supports library covers, lock/sleep-screen covers, and the home screen.
 - **Repair Book Covers:** adds a post-boot, user-triggered backfill using Kobo's native progress dialog.
 
 ### Safety
@@ -18,6 +17,3 @@
   `IconLeftButton` APIs are available and the More-page layout can be identified unambiguously.
 - **Maintainer documentation:** source comments and `REPORT.md` explain the hooks, private ABI assumptions,
   firmware validation, and safety decisions.
-
-The current implementation was validated against Kobo firmware 4.45.23697. Other firmware families require
-validation before deployment, especially where private Kobo C++ object sizes are involved.
