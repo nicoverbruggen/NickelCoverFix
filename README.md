@@ -67,6 +67,9 @@ the Repair workflow is skipped entirely. Cover capture and serving continue inde
 ./build.sh          # podman + ghcr.io/pgaskin/nickeltc:1.0 -> KoboRoot.tgz
 ```
 
+GitHub Actions runs the same NickelTC build for pushes, pull requests, and tags. Tagging a release builds the
+artifacts, uploads them, and publishes release notes from the matching section in `CHANGELOG.md`.
+
 ## Install
 Copy `KoboRoot.tgz` to `KOBOeReader/.kobo/` and reboot. It's active on install — covers are mirrored as
 books are shown, or all at once via **More > Repair Book Covers**. See `res/doc` for details.
