@@ -36,9 +36,10 @@ You can replace a mirrored cover with your own image. Put it in `.adds/nickel-co
 ### Recommended workflow
 
 1. Install the mod.
-2. Open **More > Repair Book Covers**.
-3. Connect the Kobo by USB and open `.adds/nickel-cover-fix/list.txt` to see which title, ContentID, and cover hash belong together.
-4. Use the ContentID or hash to find the corresponding files in `.adds/nickel-cover-fix/covers/`, then replace them with the covers you want to use.
+2. Connect to Wi-Fi and sync, or run **Settings > Device information > Repair your Kobo account**. Wait for Kobo to download the covers. NickelCoverFix cannot download covers; it copies the covers Kobo has already downloaded.
+3. Open **More > Repair Book Covers** to copy those downloaded covers into the mod's storage.
+4. Connect the Kobo by USB and open `.adds/nickel-cover-fix/list.txt` to see which title, ContentID, and cover hash belong together.
+5. Use the ContentID or hash to find the corresponding files in `.adds/nickel-cover-fix/covers/`, then replace them with the covers you want to use.
 
 For good results, use a portrait image with the same aspect ratio as the cover it replaces. Around 600 pixels on the long edge is usually enough for a library cover. For the lock screen, use the device's native display resolution or the dimensions of the original lock-screen cover. Larger images are scaled down without cropping, while small images may look soft when enlarged.
 
