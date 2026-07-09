@@ -156,19 +156,26 @@ static void ncf_draw_dot(QImage &img) {
     p.end();
 }
 
-// Load a source cover file and (re)write our mirror, atomically. Format from the dst extension
-// (.jpg -> JPEG q88 for the big lock cover; else PNG). Returns true on write.
+// Mirror a source cover to dst, atomically. Normal mode = a raw byte copy of Kobo's .parsed (which is
+// already a JPEG) — no decode/re-encode, no quality loss, fast. Debug-dot mode decodes to stamp the marker.
 static bool ncf_write_mirror_from(const QString &src, const QString &dst) {
     QFileInfo si(src);
     if (!si.exists() || si.size() <= 0 || si.size() > NCF_MAX_BYTES)
         return false;
-    QImage img;
-    if (!img.load(src) || img.isNull())
-        return false;
-    if (ncf_debug_dot()) ncf_draw_dot(img);                    // bake the marker into the stored cover
-    const bool jpg = dst.endsWith(QLatin1String(".jpg"));
     const QString tmp = dst + QStringLiteral(".tmp");
-    if (!img.save(tmp, jpg ? "JPG" : "PNG", jpg ? 88 : -1))
+    QFile::remove(tmp);
+    bool ok;
+    if (ncf_debug_dot()) {                                      // decode -> stamp bullseye -> re-encode
+        QImage img;
+        if (!img.load(src) || img.isNull())
+            return false;
+        ncf_draw_dot(img);
+        const bool jpg = dst.endsWith(QLatin1String(".jpg"));
+        ok = img.save(tmp, jpg ? "JPG" : "PNG", jpg ? 88 : -1);
+    } else {                                                    // fast path: straight copy, no re-encode
+        ok = QFile::copy(src, tmp);
+    }
+    if (!ok)
         return false;
     QFile::remove(dst);
     if (!QFile::rename(tmp, dst)) { QFile::remove(tmp); return false; }
