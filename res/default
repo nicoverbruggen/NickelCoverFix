@@ -1,0 +1,39 @@
+#
+# NickelCoverFix configuration (v1)
+#
+# Fixes covers blanking to the title/author PLACEHOLDER when a cover is unreachable (offline, or after a
+# sync changes the store CoverImageId). It keeps a copy of the cover Kobo ITSELF already had, keyed by the
+# book's stable ContentID, and serves that back instead of the placeholder. No book file is read and
+# nothing is decrypted. Kobo's own cache (.kobo-images) is never written; remove the mod to fully revert.
+#
+# Changes take effect on reboot.
+#
+# ─── ARMING (boot safety) ─────────────────────────────────────────────────────────────────────────────
+# The mod does NOTHING until you ARM it: create an empty file named `enabled` in this folder
+# (KOBOeReader/.adds/nickelcoverfix/enabled) over USB, then reboot. Until then every hook passes straight
+# through, so installing it cannot affect boot. To DISARM (e.g. anything misbehaves), delete that `enabled`
+# file over USB and reboot.
+#
+# ─── SUGGESTED FIRST RUN ──────────────────────────────────────────────────────────────────────────────
+#   1. Install, arm (create `enabled`), reboot — confirm a clean boot.
+#   2. Browse your library once (covers are mirrored as they show — online, or from disk if already cached),
+#      OR just tap  More > Repair book covers  to mirror the whole library at once (with a progress bar).
+#   3. Go offline (or let a sync change a cover) — the mirrored cover shows instead of a placeholder.
+#   If some books never had a cover on disk, run Settings > "Repair your Kobo account" (online) to fetch
+#   them, then  More > Repair book covers  again.
+
+# Master kill-switch. 0 = everything inert (works like stock), even when armed.
+ncf_enabled:1
+
+# CAPTURE: as a book is shown and we don't have its cover yet, mirror it (from the live cover, or from the
+# on-disk copy if offline). Once per book per session. 0 = only the manual "Repair book covers" populates.
+ncf_capture:1
+
+# SERVE: when a cover would fall back to the placeholder, show the mirrored cover instead (if we have one).
+ncf_serve:1
+
+# Add the "Repair book covers" row to the More page (mirrors every book's on-disk cover, with a progress bar).
+ncf_menu:1
+
+# Log to nickelcoverfix.log.
+ncf_log:1

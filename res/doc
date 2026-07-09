@@ -1,0 +1,39 @@
+# NickelCoverFix — v1
+
+Stops book covers from blanking to the title/author **placeholder** when the cover is temporarily
+unreachable — **offline** (the cover was shown before but nickel tries the network and fails), or after a
+**sync changes the store CoverImageId** (the new id's file is missing while the old cover is orphaned on
+disk). It keeps a copy of the cover **Kobo itself already had** — keyed by the book's stable ContentID —
+and serves that back instead of the placeholder.
+
+**No DRM, no decryption, no book files.** The mod only ever mirrors a cover nickel already obtained
+legitimately. Kobo's own cache (`.kobo-images`) is never written. Remove the mod (or its `.adds` folder)
+to fully revert.
+
+## How it works
+- **Capture** — when nickel renders a real cover, a copy is saved to
+  `KOBOeReader/.adds/nickelcoverfix/covers/<hash>.png` (once per book per session).
+- **Serve** — when nickel would show the placeholder, the mirrored cover is loaded and shown instead.
+
+Because the ContentID is stable (the CoverImageId is not), the mirror survives both offline gaps and
+imageId changes.
+
+## Arming (boot safety)
+The mod is **inert until armed**, so installing it cannot affect boot. To activate: create an empty file
+`enabled` in `KOBOeReader/.adds/nickelcoverfix/` over USB and reboot. To disable/recover: delete `enabled`
+(or set `ncf_enabled:0` in `config`) over USB and reboot.
+
+## First run (serve-first)
+1. Install, arm, reboot → confirm a clean boot (capture is off by default, so nothing heavy runs).
+2. Set `ncf_capture:1` in `config`, reboot, and browse your library **online** so covers get mirrored.
+3. Go offline — the mirrored covers show instead of placeholders.
+
+## Config (`config`, seeded from `default`)
+- `ncf_enabled` — master kill-switch (0 = inert even when armed).
+- `ncf_capture` — mirror real covers as they're shown (default 0 for first-run validation).
+- `ncf_serve` — show a mirrored cover instead of the placeholder (default 1).
+- `ncf_log` — write `nickelcoverfix.log`.
+
+## Uninstall
+Delete the `uninstall` file in this folder and reboot (removes the mod and the mirror folder;
+`.kobo-images` is untouched).

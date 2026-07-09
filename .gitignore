@@ -1,0 +1,8 @@
+.DS_Store
+/KoboRoot.tgz
+/tmp/
+/src/libnickelcoverfix.so
+
+*.o
+*.moc
+nhplugin.json
