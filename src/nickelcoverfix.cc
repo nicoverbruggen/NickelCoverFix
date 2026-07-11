@@ -38,6 +38,8 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <functional>
 #include <new>
 #include <unistd.h>
@@ -762,6 +764,22 @@ void NcfBridge::onCaptureTick() {
 }
 
 // ---- More > "Repair book covers" row -----------------------------------------------------
+// Kobo's IconLeftButton and N3ProgressDialog are private classes with no public factory, so we must provide
+// their storage ourselves. The exact class sizes were validated on firmware 4.45.23697, but a later firmware
+// could keep the same symbols while adding members. Over-allocate a generous, zero-initialized block so a
+// constructor written for a larger layout still writes inside our buffer instead of corrupting the heap. The
+// object is later freed by Kobo/Qt through the global operator delete(void*), which uses the allocator's own
+// chunk size rather than our requested size, so handing off the larger allocation is safe.
+static const size_t NCF_PRIVATE_OBJ_ALLOC = 4096;
+static void *ncf_alloc_private_object(size_t validated_size) {
+    if (validated_size == 0 || validated_size > NCF_PRIVATE_OBJ_ALLOC)
+        return nullptr;                    // margin cannot cover this size; refuse rather than under-allocate
+    void *p = ::operator new(NCF_PRIVATE_OBJ_ALLOC, std::nothrow);
+    if (p)
+        memset(p, 0, NCF_PRIVATE_OBJ_ALLOC);
+    return p;
+}
+
 static bool ncf_repair_ui_available() {
     // The manual Repair path constructs two private Kobo widgets. Require every symbol before exposing the
     // menu row; a partially styled button or a dialog-less action is less safe than omitting the feature.
@@ -825,16 +843,23 @@ void _ncf_MoreView_ctor(void *self, void *parent) {
     }
     QWidget *container = qobject_cast<QWidget *>(inner->parent());
     if (!container) return;
-    // IconLeftButton is a private Kobo class with no usable public factory. The size is validated for the
-    // target firmware; nothrow keeps an allocation failure from taking down the More page.
-    void *row = ::operator new(0x58, std::nothrow);
+    // IconLeftButton is a private Kobo class with no usable public factory. Over-allocate a zeroed block (see
+    // ncf_alloc_private_object) so a larger layout on a future firmware can't overflow; nothrow keeps an
+    // allocation failure from taking down the More page.
+    void *row = ncf_alloc_private_object(0x58);
     if (!row) return;
     iconbtn_ctor(row, container);
     if (iconbtn_setText)   iconbtn_setText(row, QStringLiteral("Repair Book Covers"));
     if (iconbtn_setPixmap) { QPixmap icon(QStringLiteral(":/images/menu/info.png")); iconbtn_setPixmap(row, icon); }
+    // Only expose the row if its tap signal actually connects. A future IconLeftButton could rename or drop
+    // tapped(); a visible but dead row is worse than omitting the feature, so tear it down and fail closed.
+    if (!QObject::connect((QObject *)row, "2tapped()", g_bridge, "1onRepairTapped()")) {
+        NCF_LOG("MoreView: IconLeftButton::tapped() did not connect; omitting Repair row");
+        static_cast<QObject *>(row)->deleteLater();
+        return;
+    }
     qboxlayout_addWidget(inner, row, 0, 0);
     static_cast<QWidget *>(row)->show();
-    QObject::connect((QObject *)row, "2tapped()", g_bridge, "1onRepairTapped()");
     NCF_LOG("MoreView: appended 'Repair Book Covers' row");
 }
 
@@ -876,8 +901,9 @@ void NcfBridge::onRepairTapped() {
     vm_forEach(QString(), fn);
 
     // 2) use Kobo's native progress dialog. Its 0x78 storage size is taken from Kobo's own
-    // ManageDictionariesWorkflow caller in firmware 4.45.23697; all methods are symbol-resolved.
-    m_dlg = ::operator new(0x78, std::nothrow);
+    // ManageDictionariesWorkflow caller in firmware 4.45.23697; we over-allocate a zeroed block so a larger
+    // layout on a future firmware can't overflow. All methods are symbol-resolved.
+    m_dlg = ncf_alloc_private_object(0x78);
     if (!m_dlg) {
         NCF_LOG("repair: native progress dialog allocation failed");
         return;
@@ -935,6 +961,26 @@ void NcfBridge::onTick() {
 }
 
 // ---- init / uninstall --------------------------------------------------------------------
+static void ncf_log_firmware() {
+    // Record the firmware version once at startup so a future-firmware breakage report shows which version ran
+    // next to the resolved-symbol map below. The serial number (field 0 of the version file) is deliberately
+    // dropped. Diagnostics only: any failure is silent and never affects startup.
+    FILE *f = fopen("/mnt/onboard/.kobo/version", "r");
+    if (!f) {
+        NCF_LOG("startup(v1): firmware version unavailable");
+        return;
+    }
+    char line[512];
+    char *got = fgets(line, sizeof(line), f);
+    fclose(f);
+    if (!got)
+        return;
+    line[strcspn(line, "\r\n")] = '\0';
+    // Format: <serial>,<...>,<firmware>,<model>,... — log everything after the serial.
+    const char *comma = strchr(line, ',');
+    NCF_LOG("startup(v1): firmware %s", comma ? comma + 1 : line);
+}
+
 static int ncf_init() {
     // NickelHook calls init only after its symbol resolution and GOT patches succeed. Keep this function fast:
     // it runs on Nickel's startup path, before the failsafe is disarmed.
@@ -942,6 +988,7 @@ static int ncf_init() {
     mkdir(NCF_CONFIG_DIR, 0755);
     QDir().mkpath(QString::fromUtf8(NCF_COVERS_DIR));
     g_bridge = new NcfBridge(nullptr);
+    ncf_log_firmware();
     NCF_LOG("startup(v1): enabled=%d capture=%d serve=%d menu=%d force=%d",
             ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu(), ncf_force_serve());
     NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p sbhw_setContent=%p bcv_setImage=%p",
