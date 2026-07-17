@@ -26,7 +26,7 @@ ncf_serve:1
 # Add the "Repair Book Covers" row to the More page (mirrors your whole library at once, with a progress bar).
 ncf_menu:1
 
-# FIRST RUN: on a fresh install with nothing cached yet, cache your covers once, ~1s after you first reach the
+# FIRST RUN: on a fresh install with nothing cached yet, cache your covers once, ~3.5s after you first reach the
 # home screen (post-boot, so it never slows startup). Runs a single time; use "Repair Book Covers" afterwards.
 ncf_firstrun:1
 

@@ -14,7 +14,7 @@
 //   REPAIR   (More > Repair book covers)— a chunked, progress-dialog pass that mirrors every book's on-disk
 //                                        cover at once (covers you never scroll to; bulk backfill).
 //
-// Keyed by Content::getId() (stable) in .adds/nickelcoverfix/covers/<sha1(ContentID)>.png. .kobo-images is
+// Keyed by Content::getId() (stable) in .adds/nickel-cover-fix/covers/<sha1(ContentID)>.png. .kobo-images is
 // never written; remove the mod (or its .adds folder) to fully revert. If a cover is missing on disk, the
 // user runs Kobo's own "Repair your Kobo account" (re-fetches covers to .kobo-images) then Repair book covers.
 //
@@ -157,7 +157,7 @@ static bool ncf_active()  { return ncf_enabled(); }
 static bool ncf_force_serve() { return ncf_global_config_bool("ncf_force_serve", true);  }
 static bool ncf_debug_dot()   { return ncf_global_config_bool("ncf_debug_dot",   false); }
 // ncf_firstrun (default ON): on a fresh install with no mirror cached yet, auto-run the cover backfill once,
-//   ~1s after the user first lands on the home screen. Post-boot and one-shot, so it never slows startup.
+//   ~3.5s after the user first lands on the home screen. Post-boot and one-shot, so it never slows startup.
 static bool ncf_firstrun()    { return ncf_global_config_bool("ncf_firstrun", true);  }
 
 // Avoid turning a frequently-called cover hook into an unbounded syslog producer. Persistent file logging is
@@ -556,7 +556,7 @@ QImage _ncf_getCoverImage(const void *vol, const QString &imageId, bool b) {
     // captured, overriding Kobo's live cover. This keeps a book's cover immune to Kobo's post-sync
     // CoverImageId churn, not just to outright fetch failures. Set ncf_force_serve:0 for fallback mode
     // (only substitute the mirror when Kobo would otherwise draw the title/author placeholder).
-    if (ncf_force_serve() && content_getId && vol) {
+    if (ncf_serve() && ncf_force_serve() && content_getId && vol) {
         const QString cid = content_getId(vol);
         if (!cid.isEmpty()) {
             QImage m = ncf_serve_mirror(cid, img.size());
@@ -624,7 +624,7 @@ extern "C" __attribute__((visibility("default")))
 void _ncf_loadCover(void *self) {
     // loadCover is a dispatch point, not an image-producing function. Route only eligible library widgets to
     // Kobo's default-cover path; all other widgets retain Nickel's normal loading behavior.
-    if (ncf_active() && ncf_force_serve() && vpv_loadDefaultCover && self) {
+    if (ncf_active() && ncf_serve() && ncf_force_serve() && vpv_loadDefaultCover && self) {
         if (ncf_widget_can_produce(self)) { vpv_loadDefaultCover(self); return; }
     }
     if (real_loadCover) real_loadCover(self);
@@ -965,7 +965,7 @@ void _ncf_HomePageView_ctor(void *self, void *parent) {
 }
 
 // ---- NcfBridge slots (defined here so they can reach the resolved symbols) ----------------
-// First-run auto-cache: on a fresh install (no mirror yet), cache the library's covers once, ~1s after the
+// First-run auto-cache: on a fresh install (no mirror yet), cache the library's covers once, ~3.5s after the
 // user first reaches the home screen. Post-boot and one-shot, so it never slows startup and never nags.
 void NcfBridge::maybeArmFirstRun(QWidget *home) {
     // Arm at most once per session, and only for a genuine fresh install. The cheap pre-checks here avoid
@@ -1009,7 +1009,7 @@ void NcfBridge::onRepairTapped() {
     // library, and it remains chunked so a large library cannot monopolize the e-ink UI event loop.
     if (m_running) return;
     if (!(content_getId && image_getFileName && device_current && vm_forEach)) {
-        if (ncf_showOKDialog) ncf_showOKDialog(QStringLiteral("Repair book covers"),
+        if (ncf_showOKDialog) ncf_showOKDialog(QStringLiteral("Repair Book Covers"),
             QStringLiteral("This isn't available on your firmware."));
         return;
     }
