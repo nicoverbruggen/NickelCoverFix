@@ -4,6 +4,8 @@ Keeps your book covers showing even when Kobo cannot fetch them, either **offlin
 
 **No DRM, no decryption, no book files.** It only copies a cover Kobo already obtained legitimately. Kobo's own cache (`.kobo-images`) is never written. Remove the mod or this folder to fully revert.
 
+**Firmware:** supports Kobo 4.30.18838 and newer.
+
 ## How it works
 
 - **Capture:** as each of *your* books is shown, its cover is queued for mirroring to `.adds/nickel-cover-fix/covers/`. The mod uses a fast raw copy from Kobo's on-disk cache when available, or the rendered image for covers that were only in memory. Store and recommendation covers are never touched.

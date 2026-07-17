@@ -70,6 +70,10 @@ After Repair finishes, it writes `.adds/nickel-cover-fix/list.txt` with one succ
 | `ncf_log` | `1` | Write `nickel-cover-fix.log`. `0` disables persistent file logging. |
 | `ncf_debug_dot` | `0` | Stamp served covers with a bullseye for debugging. |
 
+## Compatibility
+
+Supports Kobo firmware **4.30.18838 and newer** (the 4.x series). Every libnickel symbol the mod uses is validated against that floor, and the private-ABI assumptions and the grid/`BookCoverView` cover paths were verified on it. Hooks and lookups are all optional, so an older build degrades feature by feature rather than failing to load, but 4.30.18838 is the minimum supported version.
+
 ## Build
 
 ```sh
