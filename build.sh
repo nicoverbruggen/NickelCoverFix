@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds NickelCoverFix with the pgaskin/nickeltc cross-toolchain inside podman, exactly like the sibling
-# mods. Produces KoboRoot.tgz (install: drop in /mnt/onboard/.kobo and reboot).
-
 image="${NICKELTC_IMAGE:-ghcr.io/pgaskin/nickeltc:1.0}"
 workdir="${PWD}"
 scratch="${workdir}/tmp/build"
@@ -17,10 +14,18 @@ fi
 mkdir -p "${scratch}"
 
 tar \
-    --no-mac-metadata --no-xattrs --no-acls --no-fflags \
+    --no-mac-metadata \
+    --no-xattrs \
+    --no-acls \
+    --no-fflags \
     -C "${workdir}" \
-    --exclude=.git --exclude=.DS_Store --exclude=tmp --exclude=KoboRoot.tgz \
-    --exclude='*.o' --exclude='*.moc' --exclude=nhplugin.json \
+    --exclude=.git \
+    --exclude=.DS_Store \
+    --exclude=tmp \
+    --exclude=KoboRoot.tgz \
+    --exclude='*.o' \
+    --exclude='*.moc' \
+    --exclude=nhplugin.json \
     --exclude=src/libnickelcoverfix.so \
     -czf "${scratch}/source.tgz" .
 
@@ -43,8 +48,4 @@ podman run --rm -i \
 
 if [ -s "${scratch}/artifacts.tgz" ]; then
     tar -xzf "${scratch}/artifacts.tgz" -C "${workdir}"
-    echo "built: KoboRoot.tgz + src/libnickelcoverfix.so"
-else
-    echo "build produced no artifacts (see errors above)" >&2
-    exit 1
 fi

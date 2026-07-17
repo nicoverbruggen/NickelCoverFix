@@ -65,7 +65,7 @@ After Repair finishes, it writes `.adds/nickel-cover-fix/list.txt` with one succ
 | `ncf_serve` | `1` | Show a mirrored cover instead of the placeholder. |
 | `ncf_force_serve` | `1` | Select the cover mode described above. |
 | `ncf_menu` | `1` | Add the Repair Book Covers row to the More page. |
-| `ncf_log` | `1` | Write `nickelcoverfix.log`. `0` disables persistent file logging. |
+| `ncf_log` | `1` | Write `nickel-cover-fix.log`. `0` disables persistent file logging. |
 | `ncf_debug_dot` | `0` | Stamp served covers with a bullseye for debugging. |
 
 ## Build

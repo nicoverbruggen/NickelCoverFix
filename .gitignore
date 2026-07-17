@@ -1,8 +1,9 @@
-.DS_Store
+# build outputs
 /KoboRoot.tgz
 /tmp/
-/src/libnickelcoverfix.so
+src/*.so
+src/*.o
+.DS_Store
 
-*.o
-*.moc
-nhplugin.json
+# test harness build output
+test.syms

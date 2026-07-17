@@ -1011,7 +1011,7 @@ static bool ncf_uninstall() {
     ok = ncf_del(NCF_CONFIG_DIR "/config") && ok;
     ok = ncf_del(NCF_CONFIG_DIR "/default") && ok;
     ok = ncf_del(NCF_CONFIG_DIR "/doc") && ok;
-    ok = ncf_del(NCF_CONFIG_DIR "/nickelcoverfix.log") && ok;
+    ok = ncf_del(NCF_CONFIG_DIR "/nickel-cover-fix.log") && ok;
     ok = ncf_del(NCF_CONFIG_DIR "/uninstall") && ok;
     if (access(NCF_CONFIG_DIR, F_OK) == 0) ok = nh_delete_dir(NCF_CONFIG_DIR) && ok;
     return ok;
@@ -1032,24 +1032,31 @@ static struct nh_info NickelCoverFixInfo = {
 static struct nh_hook NickelCoverFixHooks[] = {
     // These are PLT/GOT hooks: NickelHook redirects calls made through libnickel's relocation table, then
     // stores the original target in the matching real_* pointer for an exact call-through.
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView13getCoverImageERK6VolumeRK7QStringb
     { .sym = "_ZN16VolumePixmapView13getCoverImageERK6VolumeRK7QStringb", .sym_new = "_ncf_getCoverImage",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_getCoverImage),
       .desc = "capture the real cover into .adds", .optional = true },
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView20generateDefaultCoverERK6VolumeRK5QSize
     { .sym = "_ZN16VolumePixmapView20generateDefaultCoverERK6VolumeRK5QSize", .sym_new = "_ncf_generateDefaultCover",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_generateDefaultCover),
       .desc = "serve mirror instead of placeholder", .optional = true },
+    //libnickel 4.6.9960 * _ZN8MoreViewC1EP7QWidget
     { .sym = "_ZN8MoreViewC1EP7QWidget", .sym_new = "_ncf_MoreView_ctor",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_moreview_ctor),
       .desc = "append Repair book covers row", .optional = true },
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView9loadCoverEv
     { .sym = "_ZN16VolumePixmapView9loadCoverEv", .sym_new = "_ncf_loadCover",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_loadCover),
       .desc = "debug force_serve: route grid covers through the default path", .optional = true },
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView10setContentERK6VolumeRK7QString
     { .sym = "_ZN16VolumePixmapView10setContentERK6VolumeRK7QString", .sym_new = "_ncf_setContent",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_setContent),
       .desc = "auto-mirror library cover as the grid populates (Volume by-symbol)", .optional = true },
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView10imageReadyERK6QImageRK6VolumeRK7QString
     { .sym = "_ZN16VolumePixmapView10imageReadyERK6QImageRK6VolumeRK7QString", .sym_new = "_ncf_imageReady",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_imageReady),
       .desc = "mirror the rendered cover (RAM-only covers), owned books only", .optional = true },
+    //libnickel 4.6.9960 * _ZN20SingleBookHomeWidget10setContentERK6Volume
     { .sym = "_ZN20SingleBookHomeWidget10setContentERK6Volume", .sym_new = "_ncf_SingleBookHomeWidget_setContent",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_sbhw_setContent),
       .desc = "home Now-Reading: push our mirror onto the widget's BookCoverView (vtable blind spot)", .optional = true },
@@ -1059,25 +1066,45 @@ static struct nh_hook NickelCoverFixHooks[] = {
 static struct nh_dlsym NickelCoverFixDlsym[] = {
     // These functions are not safely hookable through a PLT entry in the relevant call path, or are helpers
     // needed by the deferred workflow. Resolve them by exported mangled name and treat them as optional.
+    //libnickel 4.6.9960 * _ZNK7Content5getIdEv
     { .name = "_ZNK7Content5getIdEv", .out = nh_symoutptr(content_getId), .desc = "Content::getId (stable ContentID)", .optional = true },
+    //libnickel 4.6.9960 * _ZNK7Content8getTitleEv
     { .name = "_ZNK7Content8getTitleEv", .out = nh_symoutptr(content_getTitle), .desc = "Content::getTitle (Repair list label)", .optional = true },
+    //libnickel 4.6.9960 * _ZN6Device16getCurrentDeviceEv
     { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(device_current), .desc = "Device::getCurrentDevice", .optional = true },
+    //libnickel 4.6.9960 * _ZN5Image11getFileNameERK6DeviceRK6VolumeRK7QString
     { .name = "_ZN5Image11getFileNameERK6DeviceRK6VolumeRK7QString", .out = nh_symoutptr(image_getFileName), .desc = "Image::getFileName", .optional = true },
+    //libnickel 4.6.9960 * _ZN13VolumeManager7forEachERK7QStringRKSt8functionIFvRK6VolumeEE
     { .name = "_ZN13VolumeManager7forEachERK7QStringRKSt8functionIFvRK6VolumeEE", .out = nh_symoutptr(vm_forEach), .desc = "VolumeManager::forEach", .optional = true },
+    //libnickel 4.6.9960 * _ZN16VolumePixmapView16loadDefaultCoverEv
     { .name = "_ZN16VolumePixmapView16loadDefaultCoverEv", .out = nh_symoutptr(vpv_loadDefaultCover), .desc = "VolumePixmapView::loadDefaultCover", .optional = true },
+    //libnickel 4.6.9960 * _ZNK7Content14isPurchaseableEv
     { .name = "_ZNK7Content14isPurchaseableEv", .out = nh_symoutptr(content_isPurchaseable), .desc = "Content::isPurchaseable (owned-book gate)", .optional = true },
+    //libnickel 4.6.9960 * _ZNK16VolumePixmapView9getVolumeEv
     { .name = "_ZNK16VolumePixmapView9getVolumeEv", .out = nh_symoutptr(vpv_getVolume), .desc = "VolumePixmapView::getVolume (by-symbol Volume access)", .optional = true },
+    //libnickel 4.6.9960 * _ZN13BookCoverView8setImageERK6QImageRK7QString
     { .name = "_ZN13BookCoverView8setImageERK6QImageRK7QString", .out = nh_symoutptr(bcv_setImage), .desc = "BookCoverView::setImage (call directly; vtable-only, unhookable)", .optional = true },
+    //libnickel 4.6.9960 * _ZN14IconLeftButtonC1EP7QWidget
     { .name = "_ZN14IconLeftButtonC1EP7QWidget", .out = nh_symoutptr(iconbtn_ctor), .desc = "IconLeftButton ctor", .optional = true },
+    //libnickel 4.6.9960 * _ZN14IconLeftButton7setTextERK7QString
     { .name = "_ZN14IconLeftButton7setTextERK7QString", .out = nh_symoutptr(iconbtn_setText), .desc = "IconLeftButton::setText", .optional = true },
+    //libnickel 4.6.9960 * _ZN14IconLeftButton9setPixmapERK7QPixmap
     { .name = "_ZN14IconLeftButton9setPixmapERK7QPixmap", .out = nh_symoutptr(iconbtn_setPixmap), .desc = "IconLeftButton::setPixmap", .optional = true },
+    //libnickel 4.6.9960 * _ZN10QBoxLayout9addWidgetEP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE
     { .name = "_ZN10QBoxLayout9addWidgetEP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE", .out = nh_symoutptr(qboxlayout_addWidget), .desc = "QBoxLayout::addWidget", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialogC1Ev
     { .name = "_ZN16N3ProgressDialogC1Ev", .out = nh_symoutptr(ncf_progress_ctor), .desc = "native progress dialog ctor", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialog8setTitleERK7QString
     { .name = "_ZN16N3ProgressDialog8setTitleERK7QString", .out = nh_symoutptr(ncf_progress_setTitle), .desc = "native progress dialog title", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialog7setTextERK7QString
     { .name = "_ZN16N3ProgressDialog7setTextERK7QString", .out = nh_symoutptr(ncf_progress_setText), .desc = "native progress dialog text", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialog11setProgressEi
     { .name = "_ZN16N3ProgressDialog11setProgressEi", .out = nh_symoutptr(ncf_progress_setProgress), .desc = "native progress dialog value", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialog19setProgressBarRangeEii
     { .name = "_ZN16N3ProgressDialog19setProgressBarRangeEii", .out = nh_symoutptr(ncf_progress_setRange), .desc = "native progress dialog range", .optional = true },
+    //libnickel 4.6.9960 * _ZN16N3ProgressDialog21setProgressBarVisibleEb
     { .name = "_ZN16N3ProgressDialog21setProgressBarVisibleEb", .out = nh_symoutptr(ncf_progress_setVisible), .desc = "native progress bar visibility", .optional = true },
+    //libnickel 4.6.9960 * _ZN25ConfirmationDialogFactory12showOKDialogERK7QStringS2_
     { .name = "_ZN25ConfirmationDialogFactory12showOKDialogERK7QStringS2_", .out = nh_symoutptr(ncf_showOKDialog), .desc = "showOKDialog", .optional = true },
     {0},
 };
