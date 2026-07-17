@@ -13,6 +13,9 @@
 #include <QStringList>
 #include <QVector>
 #include <QSet>
+#include <QPointer>
+
+class QWidget;
 
 // Set in ncf_init() to ConfirmationDialogFactory::showOKDialog(QString const&, QString const&) [static].
 extern void (*ncf_showOKDialog)(const QString &title, const QString &text);
@@ -23,10 +26,13 @@ public:
     explicit NcfBridge(QObject *parent = nullptr) : QObject(parent) {}
     void queueCapture(const QString &src, const QString &dst, const QString &key);
     void queueRenderedCapture(const QImage &img, const QString &dst, const QString &key);
+    // Arm the one-shot first-run auto-cache when the home screen is first shown (post-boot).
+    void maybeArmFirstRun(QWidget *home);
 public slots:
     void onRepairTapped();
     void onTick();
     void onCaptureTick();
+    void onFirstRunTimer();
 private:
     struct CaptureJob {
         QString src;
@@ -46,6 +52,9 @@ private:
     void    *m_dlg     = nullptr;              // N3ProgressDialog* (Kobo-owned native dialog)
     QObject *m_timer   = nullptr;              // QTimer*
     bool     m_running = false;
+    QPointer<QWidget> m_home;                  // the home page view, to confirm we're still on it when the timer fires
+    bool     m_firstrun_armed = false;         // arm the first-run timer at most once per session
+    bool     m_firstrun = false;               // the in-flight backfill is the unattended first-run (title/UX differ)
 };
 
 #endif

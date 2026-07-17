@@ -15,9 +15,10 @@ It mirrors the cover **Kobo itself already had** into `.adds/nickel-cover-fix/co
 
 - **Capture:** as each of *your* books renders, its on-disk cover is copied from Kobo's cache (`.kobo-images`, via `Image::getFileName`) without re-encoding. Covers that were only ever in RAM are captured from the rendered image as a fallback. Store and recommendation covers are never touched.
 - **Serve:** when a cover would be a placeholder, the mirror is loaded and scaled in its place. This covers the **library grid**, the **lock/sleep screen**, and the home screen's **Now Reading** shelf.
-- **Repair Book Covers:** mirror your whole library at once from the More menu, with a progress bar.
+- **First-run caching:** on a fresh install with nothing cached yet, the mod caches your library's covers once, automatically, about a second after you first reach the home screen. It runs post-boot (so it never slows startup) and only this one time, with a "Caching covers for first-time use" progress bar.
+- **Repair Book Covers:** mirror your whole library at once from the More menu, with a progress bar — the same pass, available any time (for example after a later sync).
 
-If you have a large library, open **More > Repair Book Covers** after installing the mod. It prepares the available cached covers in one post-boot pass, so the fallback is ready much sooner. Without Repair, covers are prepared automatically as books are shown, which can take a while. Placeholders may appear while valid covers are being copied. That is expected; the mirror will be used on a later render once it is ready.
+The first-run cache above handles most people automatically. If you'd rather run it yourself, or need it again after syncing new books, open **More > Repair Book Covers**. It prepares the available cached covers in one post-boot pass, so the fallback is ready much sooner. Without either, covers are prepared automatically as books are shown, which can take a while. Placeholders may appear while valid covers are being copied. That is expected; the mirror will be used on a later render once it is ready.
 
 Because the mirror is keyed by the stable ContentID, it survives offline gaps and image ID changes.
 

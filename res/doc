@@ -58,6 +58,7 @@ That means its cover has never been available for us to copy, either on disk or 
 - `ncf_serve`: show a mirrored cover instead of the placeholder.
 - `ncf_force_serve`: selects the cover mode described above.
 - `ncf_menu`: add the Repair Book Covers row to the More page.
+- `ncf_firstrun`: on a fresh install, auto-cache your covers once, ~1s after the first home screen (post-boot).
 - `ncf_log`: write `nickel-cover-fix.log` (`0` disables persistent file logging).
 - `ncf_debug_dot`: stamp served covers with a bullseye for debugging.
 

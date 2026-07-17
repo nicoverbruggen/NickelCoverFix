@@ -58,6 +58,7 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
@@ -67,6 +68,8 @@
 #include <QPair>
 #include <QObject>
 #include <QTimer>
+#include <QWidget>
+#include <QApplication>
 #include <QPixmap>
 #include <QCryptographicHash>
 #include <QWidget>
@@ -110,6 +113,7 @@ static void   (*real_loadCover)(void *self)                                     
 static void   (*real_setContent)(void *self, const void *vol, const QString &s)        = nullptr;  // VolumePixmapView::setContent
 static void   (*real_imageReady)(void *self, const QImage &img, const void *vol, const QString &s) = nullptr; // VolumePixmapView::imageReady
 static void   (*real_sbhw_setContent)(void *self, const void *vol)                     = nullptr;  // SingleBookHomeWidget::setContent(Volume const&)
+static void   (*real_homepageview_ctor)(void *self, void *parent)                      = nullptr;  // HomePageView ctor (arms the first-run auto-cache)
 // Callables (dlsym). Optional symbols deliberately degrade one feature at a time instead of making the whole
 // plugin fail to load. Functions used by a safety-critical path are checked again immediately before use.
 static void   (*vpv_loadDefaultCover)(void *self)                                     = nullptr;  // VolumePixmapView::loadDefaultCover
@@ -127,6 +131,7 @@ static void         (*iconbtn_ctor)(void *self, void *parent)                   
 static void         (*iconbtn_setText)(void *self, const QString &s)                   = nullptr;
 static void         (*iconbtn_setPixmap)(void *self, const QPixmap &p)                 = nullptr;
 static void         (*qboxlayout_addWidget)(void *layout, void *w, int stretch, int align) = nullptr;
+static void         (*qboxlayout_insertWidget)(void *layout, int index, void *w, int stretch, int align) = nullptr;
 // N3ProgressDialog is Kobo's native post-boot progress UI. Its public methods are resolved by symbol, while
 // the 0x78 allocation is the size used by Kobo's own 4.45.23697 caller. This is still a private C++ ABI
 // assumption; missing symbols are safe, but a changed class size requires firmware validation.
@@ -151,6 +156,9 @@ static bool ncf_active()  { return ncf_enabled(); }
 //   only to rescue placeholders). ncf_debug_dot (default off): stamp served covers with a bullseye.
 static bool ncf_force_serve() { return ncf_global_config_bool("ncf_force_serve", true);  }
 static bool ncf_debug_dot()   { return ncf_global_config_bool("ncf_debug_dot",   false); }
+// ncf_firstrun (default ON): on a fresh install with no mirror cached yet, auto-run the cover backfill once,
+//   ~1s after the user first lands on the home screen. Post-boot and one-shot, so it never slows startup.
+static bool ncf_firstrun()    { return ncf_global_config_bool("ncf_firstrun", true);  }
 
 // Avoid turning a frequently-called cover hook into an unbounded syslog producer. Persistent file logging is
 // separately controlled by ncf_log in config.c; this budget only limits the most verbose per-cover messages.
@@ -544,8 +552,10 @@ QImage _ncf_getCoverImage(const void *vol, const QString &imageId, bool b) {
     QImage img = real_getCoverImage(vol, imageId, b);
 
     if (ncf_capture()) ncf_autocapture(vol, /*lock*/ true);   // sleep/read context -> full lock-screen mirror
-    // debug/verification: force our mirror onto every book that has one, so coverage is visible everywhere
-    // (books with a dot = mirrored; books without = not yet). Overrides the real cover — debug only.
+    // force_serve (default on, the aggressive mode): show our stable-ContentID mirror for every book we've
+    // captured, overriding Kobo's live cover. This keeps a book's cover immune to Kobo's post-sync
+    // CoverImageId churn, not just to outright fetch failures. Set ncf_force_serve:0 for fallback mode
+    // (only substitute the mirror when Kobo would otherwise draw the title/author placeholder).
     if (ncf_force_serve() && content_getId && vol) {
         const QString cid = content_getId(vol);
         if (!cid.isEmpty()) {
@@ -640,6 +650,26 @@ void _ncf_setContent(void *self, const void *vol, const QString &shortcoverId) {
         }
     }
     if (self && !vpv_getVolume) { QMutexLocker lk(&ncf_ov_mutex); ncf_override.insert(self, canProduce); }
+
+    // BookCoverView force_serve. Grid view (the default cover layout on newer Colour devices), the home tiles,
+    // and carousels all draw through a BookCoverView whose real cover arrives asynchronously via
+    // CoverImageProvider, bypassing loadCover and getCoverImage — so without this, force_serve never reached
+    // them and the grid showed Kobo's cover regardless of the setting. VolumePixmapView::setContent (this hook)
+    // DOES fire on that BookCoverView (it inherits the method), so when self is itself a BookCoverView we push
+    // our mirror straight in via the resolved setImage. Confirmed on-device: the pushed mirror survives the
+    // later async setImage, so force_serve is consistent across list and grid. Scoped by mirror existence, which
+    // only owned books have, so store/preview items (no mirror) fall through to Kobo untouched.
+    if (ncf_active() && ncf_serve() && ncf_force_serve() && self && vol && content_getId && bcv_setImage
+        && qstrcmp(reinterpret_cast<QObject *>(self)->metaObject()->className(), "BookCoverView") == 0) {
+        const QString cid = content_getId(vol);
+        if (!cid.isEmpty()) {
+            const QImage m = ncf_serve_mirror(cid, QSize(4096, 4096));   // full mirror; BookCoverView scales it
+            if (!m.isNull()) {
+                bcv_setImage(self, m, cid);
+                NCF_TLOG("bcv-serve cid=%s -> BookCoverView (%dx%d)", qPrintable(cid), m.width(), m.height());
+            }
+        }
+    }
 }
 
 // ---- CAPTURE (rendered): mirror the cover Kobo actually drew, so RAM-only covers (no .parsed on disk)
@@ -666,37 +696,15 @@ void _ncf_imageReady(void *self, const QImage &img, const void *vol, const QStri
         g_bridge->queueRenderedCapture(img, dst, key);
 }
 
-// ---- HOME "Now Reading" (SingleBookHomeWidget): force our cover onto the embedded BookCoverView ---------
-// The home widget dispatches its cover leaf-calls (setContent/loadCover/setImage) through the vtable, which
-// NickelHook's GOT patch can't intercept — so none of the VolumePixmapView hooks above fire for it, and the
-// home stays a placeholder while the grid works (confirmed on-device). But SingleBookHomeWidget::setContent
-// IS reached via PLT (from FourBookHomeWidget::configure), so we catch it here. After Kobo configures the
-// widget we locate its BookCoverView child through the Qt object tree (no struct offset) and push our mirror
-// straight in via BookCoverView::setImage — which is itself unhookable (vtable-only, no GOT entry), so we
-// dlsym it and call it directly. Note: home books report isPurchaseable==true, so we do NOT gate on that.
+// ---- HOME first-run trigger (SingleBookHomeWidget::setContent) -----------------------------------------
+// A reliable "the home screen is up" signal reached through the PLT (from FourBookHomeWidget::configure), unlike
+// the HomePageView ctor which is a direct call the GOT patch may miss. Used only to arm the first-run auto-cache.
+// The home tile's own cover no longer needs a bespoke push here: VolumePixmapView::setContent fires on the home's
+// BookCoverView too, so the BookCoverView force_serve path in _ncf_setContent already serves it (and captures it).
 extern "C" __attribute__((visibility("default")))
 void _ncf_SingleBookHomeWidget_setContent(void *self, const void *vol) {
-    // Home's BookCoverView uses virtual dispatch, so the normal VolumePixmapView GOT hooks never see it.
-    // The setContent seam is reached through a PLT call; after the original updates the widget, locate the
-    // child by Qt metadata and call its resolved setImage method directly.
     if (real_sbhw_setContent) real_sbhw_setContent(self, vol);
-    if (!(ncf_active() && ncf_serve()) || !self || !vol || !content_getId || !bcv_setImage)
-        return;
-    const QString cid = content_getId(vol);
-    if (cid.isEmpty())
-        return;
-    if (ncf_capture()) { ncf_autocapture(vol, /*lock*/ false); ncf_autocapture(vol, /*lock*/ true); }
-    const QImage m = ncf_serve_mirror(cid, QSize(4096, 4096));         // prefer the full lock mirror, fall back to library
-    if (m.isNull())
-        return;
-    // locate the embedded BookCoverView via the Qt object tree — offset-free, robust to layout changes
-    QObject *bcv = nullptr;
-    for (QObject *c : reinterpret_cast<QObject *>(self)->findChildren<QObject *>())
-        if (c && qstrcmp(c->metaObject()->className(), "BookCoverView") == 0) { bcv = c; break; }
-    if (!bcv)
-        return;
-    bcv_setImage(bcv, m, cid);
-    NCF_TLOG("home-serve cid=%s -> BookCoverView (%dx%d)", qPrintable(cid), m.width(), m.height());
+    if (g_bridge && self) g_bridge->maybeArmFirstRun(reinterpret_cast<QWidget *>(self));
 }
 
 void NcfBridge::queueCapture(const QString &src, const QString &dst, const QString &key) {
@@ -781,11 +789,81 @@ static void *ncf_alloc_private_object(size_t validated_size) {
 }
 
 static bool ncf_repair_ui_available() {
-    // The manual Repair path constructs two private Kobo widgets. Require every symbol before exposing the
-    // menu row; a partially styled button or a dialog-less action is less safe than omitting the feature.
-    return iconbtn_ctor && iconbtn_setText && iconbtn_setPixmap && qboxlayout_addWidget &&
+    // The manual Repair path constructs two private Kobo widgets. Require every symbol that the row and the
+    // progress dialog genuinely need to function; a dialog-less action is less safe than omitting the feature.
+    // iconbtn_setPixmap is deliberately NOT required: the row icon is cosmetic, its call site is guarded, and
+    // the symbol is absent on some firmwares (e.g. 4.29.18730) where the rest of the Repair UI is fine.
+    return iconbtn_ctor && iconbtn_setText && qboxlayout_addWidget &&
            ncf_progress_ctor && ncf_progress_setTitle && ncf_progress_setText &&
            ncf_progress_setProgress && ncf_progress_setRange && ncf_progress_setVisible;
+}
+
+// ---- first-run auto-cache gates ----------------------------------------------------------
+static const char *const NCF_FIRSTRUN_MARKER = NCF_CONFIG_DIR "/first-run-done";
+static bool ncf_firstrun_done()      { return access(NCF_FIRSTRUN_MARKER, F_OK) == 0; }
+static void ncf_mark_firstrun_done() { FILE *f = fopen(NCF_FIRSTRUN_MARKER, "w"); if (f) fclose(f); }
+// True when the mirror cache holds no cover yet — i.e. a fresh install that hasn't cached anything.
+static bool ncf_covers_empty() {
+    return QDir(QString::fromUtf8(NCF_COVERS_DIR)).entryInfoList(QDir::Files | QDir::NoDotAndDotDot).isEmpty();
+}
+// Cheap bounded probe of Kobo's own cover cache. First-run must not run (and mark itself done) on a device whose
+// cache is still empty, e.g. a brand-new Kobo that has not synced yet: there would be nothing to copy and we
+// would then never auto-run again. When covers do exist, the first shard resolves this immediately, so it stays
+// cheap even on a large cache. The scan stops as soon as it has seen a couple of parsed covers.
+static bool ncf_kobo_cache_has_covers() {
+    QDirIterator it(QStringLiteral("/mnt/onboard/.kobo-images"),
+                    QStringList() << QStringLiteral("*.parsed"),
+                    QDir::Files, QDirIterator::Subdirectories);
+    int n = 0;
+    while (it.hasNext() && n < 2) { it.next(); ++n; }
+    return n >= 2;
+}
+
+// True if o's class is base, or derives from it (walks the Qt meta-object super-class chain). Cover refresh uses
+// this so it catches every VolumePixmapView subclass (BookCoverView, ThreeBookVolumeView, VolumePackCoverView),
+// not just the exact class name.
+static bool ncf_isa(const QObject *o, const char *base) {
+    for (const QMetaObject *mo = o ? o->metaObject() : nullptr; mo; mo = mo->superClass())
+        if (qstrcmp(mo->className(), base) == 0)
+            return true;
+    return false;
+}
+
+// After a backfill finishes, re-fetch covers for the currently-visible cover views so freshly-mirrored covers
+// replace any placeholders that were drawn before the mirror existed, without the user having to navigate away
+// and back (e.g. right after the first-run backfill closes its dialog). Two widget families draw covers:
+//   - VolumePixmapView (list view, lock/sleep): loadCover() re-runs the fetch, which now hits our serve hooks.
+//   - BookCoverView (grid view, home tiles, carousels): its cover comes from the async provider, so loadCover
+//     won't re-serve our mirror; push it straight in via the resolved setImage, exactly like _ncf_setContent.
+// Offset-free (class name from the Qt meta-object) and cheap: a page holds only a handful of cover views.
+static void ncf_refresh_visible_covers() {
+    if (!ncf_serve())
+        return;
+    const QWidgetList widgets = QApplication::allWidgets();
+    for (QWidget *w : widgets) {
+        if (!w || !w->isVisible())
+            continue;
+        // Check BookCoverView first: it derives from VolumePixmapView but its cover comes from the async
+        // provider, so loadCover() would not re-serve our mirror.
+        if (ncf_isa(w, "BookCoverView")) {
+            if (!bcv_setImage || !vpv_getVolume || !content_getId)
+                continue;
+            const void *vol = vpv_getVolume(w);            // BookCoverView inherits VolumePixmapView::getVolume
+            if (!vol)
+                continue;
+            const QString cid = content_getId(vol);
+            if (cid.isEmpty())
+                continue;
+            const QImage m = ncf_serve_mirror(cid, QSize(4096, 4096));
+            if (!m.isNull())
+                bcv_setImage(w, m, cid);
+        } else if (ncf_isa(w, "VolumePixmapView")) {
+            // list view, My Books (ThreeBookVolumeView), lock screen, etc.: re-run the fetch; a missing cover
+            // now routes through our generateDefaultCover serve with the mirror in place.
+            if (real_loadCover)
+                real_loadCover(w);
+        }
+    }
 }
 
 // Find the actual More-page button layout through Qt's object tree. This avoids relying on MoreView's private
@@ -858,12 +936,72 @@ void _ncf_MoreView_ctor(void *self, void *parent) {
         static_cast<QObject *>(row)->deleteLater();
         return;
     }
-    qboxlayout_addWidget(inner, row, 0, 0);
+    // Place the row just above the Settings row rather than at the very bottom of the list. The Settings
+    // button carries objectName "settings" (set by Ui_MoreView, stable across firmware and locales). If it
+    // can't be found or insertWidget isn't resolved, fall back to appending — position is cosmetic.
+    int settings_index = -1;
+    for (int i = 0; i < inner->count(); ++i) {
+        QWidget *w = inner->itemAt(i) ? inner->itemAt(i)->widget() : nullptr;
+        if (w && w->objectName() == QLatin1String("settings")) { settings_index = i; break; }
+    }
+    if (qboxlayout_insertWidget && settings_index >= 0)
+        qboxlayout_insertWidget(inner, settings_index, row, 0, 0);
+    else
+        qboxlayout_addWidget(inner, row, 0, 0);
     static_cast<QWidget *>(row)->show();
-    NCF_LOG("MoreView: appended 'Repair Book Covers' row");
+    NCF_LOG("MoreView: added 'Repair Book Covers' row %s", settings_index >= 0 ? "above Settings" : "at end");
+}
+
+// Home screen shown: arm the one-shot first-run auto-cache. The real ctor runs first; the bridge decides
+// whether to arm. This never does work here — it only schedules a post-boot timer — so the boot path is
+// untouched. On firmware without HomePageView (pre-4.23) the optional hook simply never fires.
+extern "C" __attribute__((visibility("default")))
+void _ncf_HomePageView_ctor(void *self, void *parent) {
+    if (real_homepageview_ctor) real_homepageview_ctor(self, parent);
+    NCF_LOG("home-ctor: HomePageView constructed");
+    if (g_bridge) g_bridge->maybeArmFirstRun(static_cast<QWidget *>(self));
 }
 
 // ---- NcfBridge slots (defined here so they can reach the resolved symbols) ----------------
+// First-run auto-cache: on a fresh install (no mirror yet), cache the library's covers once, ~1s after the
+// user first reaches the home screen. Post-boot and one-shot, so it never slows startup and never nags.
+void NcfBridge::maybeArmFirstRun(QWidget *home) {
+    // Arm at most once per session, and only for a genuine fresh install. The cheap pre-checks here avoid
+    // scheduling a timer we would only no-op; the timer slot re-checks everything before doing any work.
+    if (m_firstrun_armed) return;                   // called per-cover; decide exactly once, then stay quiet
+    m_firstrun_armed = true;
+    if (!ncf_active() || !ncf_firstrun()) { NCF_LOG("first-run: disabled (active=%d firstrun=%d)", ncf_active(), ncf_firstrun()); return; }
+    if (ncf_firstrun_done())  { NCF_LOG("first-run: already done (marker present)"); return; }
+    if (!ncf_covers_empty())  { NCF_LOG("first-run: covers already present; skipping"); return; }
+    m_home = home;
+    // 3.5s clears NickelHook's 3s crash-failsafe window (measured from plugin load, which precedes the home),
+    // so the one-shot backfill can never be mistaken for a boot-time crash. Still effectively "just after home".
+    QTimer::singleShot(3500, this, SLOT(onFirstRunTimer()));
+    NCF_LOG("first-run: no cached covers; armed auto-cache (fires ~3.5s after home)");
+}
+
+void NcfBridge::onFirstRunTimer() {
+    if (m_running) { NCF_LOG("first-run: skip, a repair is already running"); return; }
+    if (m_home && !m_home->isVisible()) { NCF_LOG("first-run: skip, home not visible at timer"); return; }
+    if (!ncf_active() || !ncf_firstrun() || !ncf_repair_ui_available()) {
+        NCF_LOG("first-run: skip, inactive or repair UI unavailable (active=%d firstrun=%d ui=%d)",
+                ncf_active(), ncf_firstrun(), ncf_repair_ui_available()); return; }
+    if (!(content_getId && image_getFileName && device_current && vm_forEach)) {
+        NCF_LOG("first-run: skip, core symbols missing"); return; }
+    // Do NOT re-check ncf_covers_empty() here. maybeArmFirstRun already confirmed a fresh, empty mirror at arm
+    // time, and our OWN auto-capture writes a few mirrors the instant the home renders (within the arm delay),
+    // which would otherwise make the mirror non-empty and cancel first-run every time. The done-marker below is
+    // the real "already ran once" guard.
+    if (ncf_firstrun_done()) { NCF_LOG("first-run: skip, already done"); return; }
+    // Nothing to copy if Kobo's own cache is empty. Skip WITHOUT marking done so a later boot (after the user
+    // syncs and covers land in .kobo-images) will retry, instead of burning the one-shot on an empty library.
+    if (!ncf_kobo_cache_has_covers()) { NCF_LOG("first-run: skip, Kobo cover cache empty; will retry after covers exist"); return; }
+    ncf_mark_firstrun_done();                                  // one-shot: never auto-run again
+    m_firstrun = true;
+    NCF_LOG("first-run: auto-caching covers");
+    onRepairTapped();                                          // reuse the full enumerate/progress/backfill flow
+}
+
 void NcfBridge::onRepairTapped() {
     // Repair is intentionally user-triggered and post-boot. It is the only path allowed to enumerate the
     // library, and it remains chunked so a large library cannot monopolize the e-ink UI event loop.
@@ -910,8 +1048,12 @@ void NcfBridge::onRepairTapped() {
     }
     ncf_progress_ctor(m_dlg);
     ncf_progress_setRange(m_dlg, 0, m_work.isEmpty() ? 1 : m_work.size());
-    ncf_progress_setTitle(m_dlg, QStringLiteral("Repair Book Covers"));
-    ncf_progress_setText(m_dlg, QStringLiteral("Caching your book covers so they still show when you're offline."));
+    ncf_progress_setTitle(m_dlg, m_firstrun ? QStringLiteral("Preparing covers for first-time use...")
+                                            : QStringLiteral("Copying covers again..."));
+    ncf_progress_setText(m_dlg, m_firstrun
+        ? QStringLiteral("Your existing book covers will be copied over so that they will always work offline. "
+                         "This only needs to happen once, but it can take a bit. Please be patient.")
+        : QStringLiteral("Caching your book covers so they still show when you're offline."));
     ncf_progress_setVisible(m_dlg, true);
     static_cast<QWidget *>(m_dlg)->show();
 
@@ -949,10 +1091,15 @@ void NcfBridge::onTick() {
             m_dlg = nullptr;
         }
         const int total = m_work.size();
+        const bool wasFirstRun = m_firstrun;
+        m_firstrun = false;
         ncf_write_repair_list(m_repair_list);
         m_running = false;
-        NCF_LOG("repair: done, mirrored %d of %d", m_copied, total);
-        if (ncf_showOKDialog)
+        NCF_LOG("repair: done, mirrored %d of %d%s", m_copied, total, wasFirstRun ? " (first-run)" : "");
+        // Repaint any covers currently on screen so the newly-mirrored ones show immediately.
+        if (m_copied > 0) ncf_refresh_visible_covers();
+        // The first-run backfill is unattended, so it just closes its progress bar — no dialog to dismiss.
+        if (!wasFirstRun && ncf_showOKDialog)
             ncf_showOKDialog(QStringLiteral("Repair Book Covers"),
                 QString(QStringLiteral("Cached %1 of %2 cover(s). They'll now show offline. If books are still "
                         "missing a cover, go online and run Settings > Device information > \"Repair your Kobo "
@@ -989,11 +1136,11 @@ static int ncf_init() {
     QDir().mkpath(QString::fromUtf8(NCF_COVERS_DIR));
     g_bridge = new NcfBridge(nullptr);
     ncf_log_firmware();
-    NCF_LOG("startup(v1): enabled=%d capture=%d serve=%d menu=%d force=%d",
-            ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu(), ncf_force_serve());
-    NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p sbhw_setContent=%p bcv_setImage=%p",
+    NCF_LOG("startup(v1): enabled=%d capture=%d serve=%d menu=%d force=%d firstrun=%d",
+            ncf_enabled(), ncf_capture(), ncf_serve(), ncf_menu(), ncf_force_serve(), ncf_firstrun());
+    NCF_LOG("startup(v1): getCoverImage=%p generateDefaultCover=%p moreview=%p bridge=%p sbhw_setContent=%p bcv_setImage=%p homepageview_ctor=%p",
             (void*)real_getCoverImage, (void*)real_generateDefaultCover, (void*)real_moreview_ctor, (void*)g_bridge,
-            (void*)real_sbhw_setContent, (void*)bcv_setImage);
+            (void*)real_sbhw_setContent, (void*)bcv_setImage, (void*)real_homepageview_ctor);
     NCF_LOG("startup(v1): getId=%p device=%p getFileName=%p forEach=%p showOK=%p",
             (void*)content_getId, (void*)device_current, (void*)image_getFileName, (void*)vm_forEach,
             (void*)ncf_showOKDialog);
@@ -1060,6 +1207,10 @@ static struct nh_hook NickelCoverFixHooks[] = {
     { .sym = "_ZN20SingleBookHomeWidget10setContentERK6Volume", .sym_new = "_ncf_SingleBookHomeWidget_setContent",
       .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_sbhw_setContent),
       .desc = "home Now-Reading: push our mirror onto the widget's BookCoverView (vtable blind spot)", .optional = true },
+    //libnickel 4.23.15505 * _ZN12HomePageViewC1EP7QWidget
+    { .sym = "_ZN12HomePageViewC1EP7QWidget", .sym_new = "_ncf_HomePageView_ctor",
+      .lib = NCF_LIBNICKEL, .out = nh_symoutptr(real_homepageview_ctor),
+      .desc = "first-run: auto-cache covers on the first home screen (4.23+)", .optional = true },
     {0},
 };
 
@@ -1092,6 +1243,8 @@ static struct nh_dlsym NickelCoverFixDlsym[] = {
     { .name = "_ZN14IconLeftButton9setPixmapERK7QPixmap", .out = nh_symoutptr(iconbtn_setPixmap), .desc = "IconLeftButton::setPixmap", .optional = true },
     //libnickel 4.6.9960 * _ZN10QBoxLayout9addWidgetEP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE
     { .name = "_ZN10QBoxLayout9addWidgetEP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE", .out = nh_symoutptr(qboxlayout_addWidget), .desc = "QBoxLayout::addWidget", .optional = true },
+    //libnickel 4.6.9960 * _ZN10QBoxLayout12insertWidgetEiP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE
+    { .name = "_ZN10QBoxLayout12insertWidgetEiP7QWidgeti6QFlagsIN2Qt13AlignmentFlagEE", .out = nh_symoutptr(qboxlayout_insertWidget), .desc = "QBoxLayout::insertWidget (place Repair above Settings)", .optional = true },
     //libnickel 4.6.9960 * _ZN16N3ProgressDialogC1Ev
     { .name = "_ZN16N3ProgressDialogC1Ev", .out = nh_symoutptr(ncf_progress_ctor), .desc = "native progress dialog ctor", .optional = true },
     //libnickel 4.6.9960 * _ZN16N3ProgressDialog8setTitleERK7QString
