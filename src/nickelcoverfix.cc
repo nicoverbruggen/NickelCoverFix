@@ -936,13 +936,15 @@ void _ncf_MoreView_ctor(void *self, void *parent) {
         static_cast<QObject *>(row)->deleteLater();
         return;
     }
-    // Place the row just above the Settings row rather than at the very bottom of the list. The Settings
-    // button carries objectName "settings" (set by Ui_MoreView, stable across firmware and locales). If it
-    // can't be found or insertWidget isn't resolved, fall back to appending — position is cosmetic.
+    // Place the row just above the Settings row rather than at the very bottom of the list. Ui_MoreView::setupUi
+    // sets the Settings button's objectName to "settingsButton" (the Qt Designer widget name, set unconditionally
+    // and independent of locale/translation, verified identical on 4.38 and 4.45). Hidden siblings stay in the
+    // layout, so this finds the true index regardless of which rows a given device hides. If it can't be found or
+    // insertWidget isn't resolved, fall back to appending; position is cosmetic.
     int settings_index = -1;
     for (int i = 0; i < inner->count(); ++i) {
         QWidget *w = inner->itemAt(i) ? inner->itemAt(i)->widget() : nullptr;
-        if (w && w->objectName() == QLatin1String("settings")) { settings_index = i; break; }
+        if (w && w->objectName() == QLatin1String("settingsButton")) { settings_index = i; break; }
     }
     if (qboxlayout_insertWidget && settings_index >= 0)
         qboxlayout_insertWidget(inner, settings_index, row, 0, 0);

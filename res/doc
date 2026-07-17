@@ -8,7 +8,7 @@ Keeps your book covers showing even when Kobo cannot fetch them, either **offlin
 
 - **Capture:** as each of *your* books is shown, its cover is queued for mirroring to `.adds/nickel-cover-fix/covers/`. The mod uses a fast raw copy from Kobo's on-disk cache when available, or the rendered image for covers that were only in memory. Store and recommendation covers are never touched.
 - **Serve:** when a cover would be a placeholder, the mirrored cover is shown instead. The image is scaled to the requested size for the library, lock/sleep screen, and home screen's **Now Reading** shelf.
-- **Repair Book Covers:** mirror your whole library at once from the More menu, with Kobo's native progress dialog.
+- **Repair Book Covers:** mirror your whole library at once from the More page, via the row placed just above **Settings**, with Kobo's native progress dialog. First-run does this once automatically; use the row to run it again (for example after syncing new books).
 
 If you have a large library, use **More > Repair Book Covers** after installation. It prepares available cached covers in one pass. Without Repair, covers are prepared automatically as books are shown and may take longer. Placeholders may appear while valid covers are being copied. That is expected; the mirrored cover is used on a later render once it is ready.
 
@@ -44,7 +44,7 @@ To disable the mod, set `ncf_enabled:0` in `config` over USB and reboot. To remo
 
 ## Cover mode (`ncf_force_serve`)
 
-- `1` (default): **scoped override**. Your library books show our own copy for consistent offline behavior. Store, recommendation, preview, and new or cloud books fall through to Kobo untouched.
+- `1` (default): **aggressive override**. Every library book shows our own copy, in both list view and grid view (grid is the default cover layout on newer Colour devices), so a cover stays immune to Kobo's post-sync cover-id churn, not just to outright fetch failures. Store, recommendation, preview, and new or cloud books have no mirror, so they fall through to Kobo untouched.
 - `0`: **graceful fallback**. Kobo's real cover is used when available, and our copy is used only to replace a placeholder.
 
 ## If a book still shows a placeholder
@@ -58,7 +58,7 @@ That means its cover has never been available for us to copy, either on disk or 
 - `ncf_serve`: show a mirrored cover instead of the placeholder.
 - `ncf_force_serve`: selects the cover mode described above.
 - `ncf_menu`: add the Repair Book Covers row to the More page.
-- `ncf_firstrun`: on a fresh install, auto-cache your covers once, ~1s after the first home screen (post-boot).
+- `ncf_firstrun`: on a fresh install with nothing cached yet, and once Kobo's own cache actually has covers to copy, auto-cache your whole library once, about 3.5s after the first home screen (post-boot, one-shot), behind a "Preparing covers for first-time use..." progress bar. If Kobo's cache is empty it waits and retries on a later boot.
 - `ncf_log`: write `nickel-cover-fix.log` (`0` disables persistent file logging).
 - `ncf_debug_dot`: stamp served covers with a bullseye for debugging.
 
