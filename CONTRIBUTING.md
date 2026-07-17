@@ -2,8 +2,9 @@
 
 Technical guide for building, testing, and changing the mod. For how cover capture and serving
 actually work, the private-object construction behind the optional Repair UI, and the firmware
-assumptions each feature makes, read [REPORT.md](REPORT.md), the safety and design writeup that
-accompanies the (deliberately non-technical) README. These mods follow the shared conventions in
+assumptions each feature makes, read the source comments in `src/nickelcoverfix.cc`, which document
+the hooks, private ABI assumptions, and safety decisions alongside the (deliberately non-technical)
+README. These mods follow the shared conventions in
 [NickelGuidance](https://github.com/nicoverbruggen/NickelGuidance).
 
 ## Building

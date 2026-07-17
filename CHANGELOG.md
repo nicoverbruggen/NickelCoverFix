@@ -15,5 +15,5 @@
   outside the render call stack with image, cache-size, and free-space limits.
 - **Fail-closed optional UI:** the manual Repair row is omitted unless Kobo's complete `N3ProgressDialog` and
   `IconLeftButton` APIs are available and the More-page layout can be identified unambiguously.
-- **Maintainer documentation:** source comments and `REPORT.md` explain the hooks, private ABI assumptions,
+- **Maintainer documentation:** source comments explain the hooks, private ABI assumptions,
   firmware validation, and safety decisions.
