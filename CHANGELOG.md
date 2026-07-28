@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3
+
+### Changed
+
+- **Updated NickelHook.** When a mod fails to start, the framework now restores each hook in the library it was installed in. NickelCoverFix only hooks `libnickel`, so nothing changes here in practice.
+
 ## v0.2
 
 ### Added

@@ -1,5 +1,8 @@
 # NickelCoverFix
 
+> [!WARNING]
+> This mod is experimental. It is stable in daily use, but it still has performance issues and needs testing on more devices. My other Kobo mods are further along. It is not offered by the KoboPatch Web UI yet.
+
 A [NickelHook](https://github.com/pgaskin/NickelHook) mod for Kobo e-readers that stops book covers from blanking to the title/author **placeholder** when Kobo cannot fetch them. It can also be used with custom cover images if you want to replace selected covers.
 
 ## The problem
